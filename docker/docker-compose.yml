@@ -1,0 +1,112 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: commitflow_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-commitflow}
+      POSTGRES_USER: ${POSTGRES_USER:-commitflow_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-commitflow_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-commitflow_user} -d ${POSTGRES_DB:-commitflow}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: commitflow_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    container_name: commitflow_backend
+    restart: unless-stopped
+    command: >
+      sh -c "python manage.py migrate &&
+             python manage.py runserver 0.0.0.0:8000"
+    volumes:
+      - ../backend:/app
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  celery_worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    container_name: commitflow_celery_worker
+    restart: unless-stopped
+    command: celery -A commitflow worker -l info -c 4
+    volumes:
+      - ../backend:/app
+    env_file:
+      - ../.env
+    depends_on:
+      backend:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  celery_beat:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    container_name: commitflow_celery_beat
+    restart: unless-stopped
+    command: celery -A commitflow beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    volumes:
+      - ../backend:/app
+    env_file:
+      - ../.env
+    depends_on:
+      backend:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.frontend
+    container_name: commitflow_frontend
+    restart: unless-stopped
+    volumes:
+      - ../frontend:/app
+      - /app/node_modules
+      - /app/.next
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  redis_data:

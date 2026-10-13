@@ -1,0 +1,13 @@
+# Cloudflare Zero-Trust Tunnel Configuration for CommitFlow Backend
+tunnel: <YOUR-TUNNEL-UUID>
+credentials-file: /etc/cloudflared/credentials.json
+
+ingress:
+  # Public API hostname routed to Django backend
+  - hostname: api.commitflow.com
+    service: http://backend:8000
+    originRequest:
+      noTLSVerify: false
+      connectTimeout: 30s
+  # Catch-all rule (required by Cloudflare Tunnel)
+  - service: http_status:404
