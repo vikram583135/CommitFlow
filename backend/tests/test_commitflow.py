@@ -116,12 +116,50 @@ class PipelineExecutionTests(TestCase):
             enabled=True
         )
 
-    def test_automation_execution_pipeline(self):
-        slot = "2026-10-13-test-slot"
+    def test_rejection_without_ai_config(self):
+        slot = "2026-10-13-no-ai-slot"
         result_msg = execute_automation_task(str(self.automation.id), slot)
-        self.assertIn("published successfully", result_msg)
-
+        self.assertIn("AI Provider not configured", result_msg)
         execution = Execution.objects.get(automation=self.automation, scheduled_slot=slot)
-        self.assertEqual(execution.status, "SUCCESS")
-        self.assertTrue(execution.published_change is not None)
-        self.assertTrue(execution.generated_files.count() > 0)
+        self.assertEqual(execution.status, "REJECTED")
+
+    def test_automation_execution_pipeline_with_ai(self):
+        from unittest.mock import patch, MagicMock
+        ai_config = AIProviderConfig.objects.create(
+            user=self.user,
+            provider="openai",
+            model_name="gpt-4o-mini"
+        )
+        ai_config.set_api_key("sk-test-key-mocked")
+        ai_config.save()
+        self.automation.ai_config = ai_config
+        self.automation.save()
+
+        mock_proposal = CodeProposal(
+            summary="Java BST Practice",
+            commit_message="feat(dsa): implement BST insertion with tests",
+            pr_title="Java BST Insertion",
+            pr_body="Adds BST algorithm with unit tests",
+            files=[
+                ProposedFile(
+                    path="src/main/java/BSTNode.java",
+                    change_type="CREATE",
+                    content="package dsa;\npublic class BSTNode { public int val; public BSTNode(int v){ this.val = v; } }"
+                ),
+                ProposedFile(
+                    path="src/test/java/BSTNodeTest.java",
+                    change_type="CREATE",
+                    content="package dsa;\nimport org.junit.jupiter.api.Test;\npublic class BSTNodeTest { @Test public void test(){ new BSTNode(1); } }"
+                )
+            ]
+        )
+
+        with patch('apps.ai_engine.adapters.openai_adapter.OpenAIAdapter.generate_changes', return_value=mock_proposal):
+            slot = "2026-10-13-test-slot"
+            result_msg = execute_automation_task(str(self.automation.id), slot)
+            self.assertIn("published successfully", result_msg)
+
+            execution = Execution.objects.get(automation=self.automation, scheduled_slot=slot)
+            self.assertEqual(execution.status, "SUCCESS")
+            self.assertTrue(execution.published_change is not None)
+            self.assertTrue(execution.generated_files.count() > 0)

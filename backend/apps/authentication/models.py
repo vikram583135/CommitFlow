@@ -30,6 +30,13 @@ class User(AbstractBaseUser, PermissionsMixin):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     email = models.EmailField(unique=True, db_index=True)
     name = models.CharField(max_length=255, blank=True)
+    avatar_url = models.URLField(blank=True, null=True)
+    auth_provider = models.CharField(
+        max_length=20,
+        choices=[('email', 'Email'), ('github', 'GitHub'), ('google', 'Google')],
+        default='email'
+    )
+    provider_id = models.CharField(max_length=255, blank=True, db_index=True)
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)

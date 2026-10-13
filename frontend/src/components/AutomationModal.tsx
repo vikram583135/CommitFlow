@@ -1,18 +1,27 @@
 import React, { useState } from 'react';
-import { X, Check, Code, FileText, CheckSquare, BookOpen } from 'lucide-react';
-import { Automation } from '../types';
+import { X, Check, Code, FileText, CheckSquare, BookOpen, GitBranch } from 'lucide-react';
+import { Automation, Repository } from '../types';
 
 interface AutomationModalProps {
   isOpen: boolean;
   onClose: () => void;
+  repositories: Repository[];
   onSave: (automation: Partial<Automation>) => void;
 }
 
-export const AutomationModal: React.FC<AutomationModalProps> = ({ isOpen, onClose, onSave }) => {
-  const [title, setTitle] = useState('Daily Java DSA Practice');
+export const AutomationModal: React.FC<AutomationModalProps> = ({
+  isOpen,
+  onClose,
+  repositories,
+  onSave,
+}) => {
+  const [selectedRepoId, setSelectedRepoId] = useState<string>(
+    repositories[0]?.id || ''
+  );
+  const [title, setTitle] = useState('Daily Practice & Tests');
   const [taskType, setTaskType] = useState<'coding_practice' | 'documentation' | 'unit_tests' | 'learning_notes'>('coding_practice');
-  const [instructions, setInstructions] = useState('Implement one data structure or algorithm concept daily with JUnit 5 tests.');
-  const [allowedPaths, setAllowedPaths] = useState('src/main/java/, src/test/java/');
+  const [instructions, setInstructions] = useState('Implement a core concept with thorough unit test assertions and documentation.');
+  const [allowedPaths, setAllowedPaths] = useState('src/, tests/');
   const [cronTime, setCronTime] = useState('09:00');
   const [branchStrategy, setBranchStrategy] = useState<'PULL_REQUEST' | 'DIRECT_PUSH'>('PULL_REQUEST');
   const [requireApproval, setRequireApproval] = useState(false);
@@ -25,6 +34,7 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({ isOpen, onClos
       title,
       task_type: taskType,
       instructions,
+      repository: selectedRepoId || (repositories[0] ? repositories[0].id : ''),
       branch_strategy: branchStrategy,
       require_approval: requireApproval,
       cron_expression: `0 ${parseInt(cronTime.split(':')[0], 10)} * * *`,
@@ -36,11 +46,11 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({ isOpen, onClos
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-      <div className="mono-panel w-full max-w-lg rounded-xl bg-zinc-950 p-6 shadow-2xl">
+      <div className="mono-panel w-full max-w-lg rounded-xl bg-zinc-950 p-6 shadow-2xl border border-zinc-800">
         <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
           <div>
-            <h2 className="text-sm font-mono uppercase tracking-wider font-semibold text-white">New Automation Rule</h2>
-            <p className="text-[11px] text-zinc-400">Configure task goal, directory bounds, and publishing rules</p>
+            <h2 className="text-sm font-mono uppercase tracking-wider font-semibold text-white">Create Automation Rule</h2>
+            <p className="text-[11px] text-zinc-400">Configure task goal, repository boundary, and PR policy</p>
           </div>
           <button onClick={onClose} className="p-1 rounded text-zinc-400 hover:text-white hover:bg-zinc-900">
             <X className="w-4 h-4" />
@@ -48,6 +58,29 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({ isOpen, onClos
         </div>
 
         <form onSubmit={handleSubmit} className="mt-4 space-y-4">
+          {/* Target Repository Picker */}
+          <div>
+            <label className="block text-[11px] font-mono text-zinc-400 mb-1">TARGET GITHUB REPOSITORY</label>
+            {repositories.length > 0 ? (
+              <select
+                value={selectedRepoId}
+                onChange={(e) => setSelectedRepoId(e.target.value)}
+                className="w-full px-3 py-2 text-xs rounded bg-black border border-zinc-800 text-white focus:outline-none focus:border-zinc-500 font-mono"
+                required
+              >
+                {repositories.map((repo) => (
+                  <option key={repo.id} value={repo.id}>
+                    {repo.full_name} ({repo.default_branch})
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <div className="p-2.5 rounded bg-zinc-900 border border-zinc-800 text-[11px] font-mono text-zinc-400">
+                No authorized repositories found. Click "Sync Repos" or connect your GitHub account.
+              </div>
+            )}
+          </div>
+
           <div>
             <label className="block text-[11px] font-mono text-zinc-400 mb-1">RULE TITLE</label>
             <input
