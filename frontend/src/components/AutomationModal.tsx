@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Check, Code, FileText, CheckSquare, BookOpen, GitBranch } from 'lucide-react';
+import { X, Check, Code, FileText, CheckSquare, BookOpen } from 'lucide-react';
 import { Automation, Repository } from '../types';
 
 interface AutomationModalProps {

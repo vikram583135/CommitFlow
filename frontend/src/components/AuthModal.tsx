@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { X, Github, Mail, Key, ShieldCheck, ArrowRight, User as UserIcon } from 'lucide-react';
-import { loginWithEmail, registerWithEmail, getOAuthUrl, handleOAuthCallback } from '../lib/api';
+import { X, Github, Mail, ArrowRight } from 'lucide-react';
+import { loginWithEmail, registerWithEmail, handleOAuthCallback } from '../lib/api';
 
 interface AuthModalProps {
   isOpen: boolean;

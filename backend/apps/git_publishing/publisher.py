@@ -1,6 +1,6 @@
 import time
 import httpx
-from typing import Dict, Any, Optional
+from typing import Optional
 from apps.github_integration.models import Repository
 from apps.ai_engine.adapters.schemas import CodeProposal
 

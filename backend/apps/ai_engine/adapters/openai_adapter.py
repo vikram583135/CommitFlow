@@ -11,9 +11,9 @@ class OpenAIAdapter(BaseAIAdapter):
 
     def test_connection(self) -> bool:
         try:
-            response = self.client.models.list()
+            self.client.models.list()
             return True
-        except Exception as e:
+        except Exception:
             return False
 
     def generate_changes(self, instructions: str, repo_context: Dict[str, Any]) -> CodeProposal:

@@ -1,7 +1,7 @@
 import os
 import re
-from typing import List, Dict, Any, Tuple
-from apps.ai_engine.adapters.schemas import CodeProposal, ProposedFile
+from typing import List, Dict, Any
+from apps.ai_engine.adapters.schemas import CodeProposal
 
 BLOCKED_PATTERNS = [
     r"^\.env.*",

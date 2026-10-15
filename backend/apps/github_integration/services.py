@@ -5,7 +5,6 @@ import hashlib
 import jwt
 import httpx
 from typing import List, Dict, Any, Optional
-from django.conf import settings
 from .models import GitHubConnection, Repository
 from apps.authentication.models import User
 

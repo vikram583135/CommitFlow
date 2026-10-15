@@ -1,5 +1,5 @@
 import React from 'react';
-import { GitCommit, Play, Plus, Sliders, RefreshCw, User, LogOut, LogIn } from 'lucide-react';
+import { GitCommit, Plus, Sliders, RefreshCw, LogOut, LogIn } from 'lucide-react';
 
 interface HeaderProps {
   user: any | null;

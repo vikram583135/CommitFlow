@@ -23,7 +23,7 @@ import {
   logoutUser,
   getStoredToken,
 } from '../lib/api';
-import { Clock, ChevronRight, Pause, PlayCircle, Play, ShieldAlert, Sparkles, CheckCircle2 } from 'lucide-react';
+import { Clock, ChevronRight, Pause, PlayCircle, Play } from 'lucide-react';
 
 export default function Dashboard() {
   const [user, setUser] = useState<any | null>(null);

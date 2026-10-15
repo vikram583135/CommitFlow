@@ -8,7 +8,6 @@ from rest_framework.permissions import IsAuthenticated
 from .models import Execution
 from .serializers import ExecutionSerializer
 from .tasks import execute_automation_task
-from apps.automations.models import Automation
 
 class ExecutionListView(generics.ListAPIView):
     serializer_class = ExecutionSerializer

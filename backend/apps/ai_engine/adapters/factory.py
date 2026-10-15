@@ -1,4 +1,3 @@
-from typing import Optional
 from apps.ai_engine.models import AIProviderConfig
 from .base import BaseAIAdapter
 from .openai_adapter import OpenAIAdapter

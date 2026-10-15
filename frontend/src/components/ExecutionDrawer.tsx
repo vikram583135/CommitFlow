@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { X, CheckCircle2, AlertCircle, Loader2, GitPullRequest, ExternalLink, Terminal } from 'lucide-react';
+import { X, CheckCircle2, AlertCircle, Loader2, ExternalLink, Terminal } from 'lucide-react';
 import { Execution } from '../types';
 
 interface ExecutionDrawerProps {

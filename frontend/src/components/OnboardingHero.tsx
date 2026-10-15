@@ -1,5 +1,5 @@
 import React from 'react';
-import { Github, Key, Sparkles, ArrowRight, ShieldCheck, CheckCircle2 } from 'lucide-react';
+import { Github, Key, Sparkles, ShieldCheck, CheckCircle2 } from 'lucide-react';
 
 interface OnboardingHeroProps {
   hasGitHub: boolean;
