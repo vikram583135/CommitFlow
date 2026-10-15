@@ -1,0 +1,24 @@
+# Cloudflare Tunnel Configuration for CommitFlow Production
+# For use with 'cloudflared tunnel run'
+
+tunnel: commitflow-prod-tunnel
+credentials-file: /etc/cloudflared/credentials.json
+
+ingress:
+  # Route API, Webhooks and Real-Time SSE to Django Backend
+  - hostname: api.commitflow.dev
+    service: http://backend:8000
+    originRequest:
+      noTLSVerify: false
+      connectTimeout: 30s
+      http2Origin: false
+      keepAliveTimeout: 1m30s
+
+  # Health Check Probe
+  - hostname: health.commitflow.dev
+    service: http://backend:8000/api/health/
+    originRequest:
+      connectTimeout: 5s
+
+  # Default Catch-All Rule
+  - service: http_status:404
