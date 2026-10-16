@@ -58,3 +58,7 @@ frontend/.env.local
 
 # Docker
 *.docker.log
+
+# Cloudflared binaries
+*.exe
+cloudflare/cloudflared.exe

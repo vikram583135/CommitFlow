@@ -17,6 +17,7 @@ class OAuthService:
                 f"?client_id={client_id}"
                 f"&redirect_uri={redirect_uri}"
                 f"&scope=read:user,user:email,repo"
+                f"&state=github"
             )
             return {"provider": "github", "url": url}
         elif provider == "google":
@@ -28,6 +29,7 @@ class OAuthService:
                 f"&response_type=code"
                 f"&scope=openid%20email%20profile"
                 f"&access_type=offline"
+                f"&state=google"
             )
             return {"provider": "google", "url": url}
         else:

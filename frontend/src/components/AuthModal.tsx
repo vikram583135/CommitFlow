@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { X, Github, Mail, ArrowRight } from 'lucide-react';
-import { loginWithEmail, registerWithEmail, handleOAuthCallback } from '../lib/api';
+import { loginWithEmail, registerWithEmail, handleOAuthCallback, getOAuthUrl } from '../lib/api';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -42,9 +42,17 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
     setIsLoading(true);
     setError(null);
     try {
-      // In development mode, we can directly trigger developer OAuth callback
-      const data = await handleOAuthCallback(provider, 'dev_code');
-      onSuccess(data.user);
+      // 1. Fetch provider auth url
+      const data = await getOAuthUrl(provider);
+      if (data?.url && !data.url.includes('demo_')) {
+        // Real OAuth credentials configured -> redirect to GitHub / Google
+        window.location.href = data.url;
+        return;
+      }
+
+      // 2. Dev mode fallback when credentials are not yet configured
+      const authData = await handleOAuthCallback(provider, 'dev_code');
+      onSuccess(authData.user);
       onClose();
     } catch (err: any) {
       setError(err.message || `Failed to sign in with ${provider}`);
