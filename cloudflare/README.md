@@ -57,36 +57,74 @@ This guide provides end-to-end, production-grade instructions to deploy the Comm
 
 ## Part 1: Backend Deployment with Cloudflare Tunnel
 
-Cloudflare Tunnel creates an encrypted outbound tunnel between your server and Cloudflare edge. You **never need to open ports 80, 443, or 8000** in your VPS firewall.
+Cloudflare Tunnel creates an encrypted outbound connection between your server and Cloudflare's edge. You **never need to open ports 80, 443, or 8000** in your VPS firewall.
 
-### Option A: Cloudflare Zero Trust Dashboard (Recommended - Simplest)
+We support two modes:
+- **Option 1 (Default): Quick Tunnel** — 100% free, instant, zero custom domain required.
+- **Option 2: Named Tunnel (`commitflow-production`)** — Permanent custom subdomains once a domain is linked to Cloudflare.
 
-1. Open [Cloudflare Zero Trust Dashboard](https://one.dash.cloudflare.com/).
-2. Navigate to **Networks** → **Tunnels** → Click **Add a tunnel**.
-3. Select **Cloudflare (cloudflared)** and click **Next**.
-4. Name the tunnel: `commitflow-production`.
-5. Under **Choose your environment**, click **Docker** and copy the Tunnel Token from the command:
-   ```
-   eyJhIjoiYmQ... (Base64 string following --token)
-   ```
-6. Add Public Hostnames in the tunnel settings:
-   - **Service 1 (Backend API):**
-     - Subdomain: `api`
-     - Domain: `yourdomain.com`
-     - Type: `HTTP`
-     - URL: `backend:8000`
-   - **Service 2 (Health Check):**
-     - Subdomain: `health`
-     - Domain: `yourdomain.com`
-     - Type: `HTTP`
-     - URL: `backend:8000`
-     - Path: `/api/health/`
-7. Click **Save Tunnel**.
+---
 
-### Adding the Tunnel to Docker Compose
+### Option 1: Quick Tunnel (`*.trycloudflare.com`) — Instant & Zero-Domain (Default)
 
-On your server, open `docker/docker-compose.yml` and add the `cloudflared` service:
+Use this to get an instant public HTTPS URL without needing a registered domain or Cloudflare account token.
 
+#### Step 1: Docker Compose Setup (Active in repo)
+The `cloudflared` service in [`docker/docker-compose.yml`](file:///c:/Users/sanvi/Desktop/PROJ/CommitFlow/docker/docker-compose.yml#L110-L115) is configured by default:
+
+```yaml
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: commitflow_tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --url http://backend:8000
+    depends_on:
+      - backend
+```
+
+#### Step 2: Start Containers and Retrieve Your Public URL
+```bash
+# Start your docker compose stack
+docker compose -f docker/docker-compose.yml up -d --build
+
+# View the generated trycloudflare URL in container logs
+docker logs commitflow_tunnel
+```
+
+Look for the log banner:
+```
++--------------------------------------------------------------------------------------------+
+|  Your quick Tunnel has been created! Visit it at:                                          |
+|  https://random-assigned-name.trycloudflare.com                                            |
++--------------------------------------------------------------------------------------------+
+```
+
+#### Step 3: Local Windows Testing Without Docker
+You can also run the local tunnel directly on your machine:
+```powershell
+.\cloudflare\cloudflared.exe tunnel --url http://127.0.0.1:8000
+```
+
+Both your API and health checks are immediately reachable:
+- `https://<your-quick-url>.trycloudflare.com/api/`
+- `https://<your-quick-url>.trycloudflare.com/api/health/`
+
+*(Note: CommitFlow backend is already pre-configured to allow `*.trycloudflare.com` in `ALLOWED_HOSTS` and `CSRF_TRUSTED_ORIGINS`).*
+
+---
+
+### Option 2: Named Production Tunnel (`commitflow-production`) — Permanent Subdomains
+
+When you are ready for a permanent custom domain (e.g. `api.yourdomain.com`):
+
+#### Step 1: Add Token to `.env`
+Add your tunnel token to your server's `.env` file (the `commitflow-production` token is already saved in your local `.env`):
+```ini
+CLOUDFLARE_TUNNEL_TOKEN=eyJoIjoiMjhjNmQ1MGItOWMyNi00ODFjLTg0MGQtMTA0NzA3MmFhMWFhIiwidCI6IjM3ZDI4YWNlNDllNzQ5MTAzZjgxMDE1YThlYjBhZWQ4IiwicyI6Ik1XTmtZVFkwTURndE1qUTNZUzAwTlRVMExUa3lZbVV0WWpJM01ERTVZVEJpTkRVMiJ9
+```
+
+#### Step 2: Switch Docker Compose to Named Tunnel Mode
+In [`docker/docker-compose.yml`](file:///c:/Users/sanvi/Desktop/PROJ/CommitFlow/docker/docker-compose.yml#L114):
 ```yaml
   cloudflared:
     image: cloudflare/cloudflared:latest
@@ -97,35 +135,22 @@ On your server, open `docker/docker-compose.yml` and add the `cloudflared` servi
       - backend
 ```
 
-In your server's `.env` file, configure:
-```ini
-CLOUDFLARE_TUNNEL_TOKEN=eyJhIjoiYmQ...your_copied_token...
-```
+#### Step 3: Configure Public Hostnames in Cloudflare Zero Trust
+1. In [Cloudflare Zero Trust Dashboard](https://one.dash.cloudflare.com/) → **Networks** → **Tunnels**.
+2. Click **commitflow-production** → **Configure** → **Public Hostname** tab:
+   - **Service 1 (Backend API & SSE):**
+     - Subdomain: `api` | Domain: `yourdomain.com`
+     - Type: `HTTP` | URL: `backend:8000`
+   - **Service 2 (Health Check):**
+     - Subdomain: `health` | Domain: `yourdomain.com`
+     - Type: `HTTP` | URL: `backend:8000` | Path: `/api/health/`
+3. Click **Save Hostname**.
 
----
+#### 💡 Free Domain Options for Named Tunnels
+If you don't own a paid domain:
+- **GitHub Student Developer Pack:** Free `.me`, `.tech`, or `.live` domain from Namecheap / Name.com.
+- **Free Registrars:** Free domains from `US.kg` or `EU.org` which support Cloudflare nameservers.
 
-### Option B: Command-Line (`cloudflared` CLI)
-
-If you prefer managing tunnels via CLI:
-
-```bash
-# 1. Install cloudflared on the VPS
-curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-sudo dpkg -i cloudflared.deb
-
-# 2. Authenticate
-cloudflared tunnel login
-
-# 3. Create the tunnel
-cloudflared tunnel create commitflow-production
-
-# 4. Route DNS records
-cloudflared tunnel route dns commitflow-production api.yourdomain.com
-cloudflared tunnel route dns commitflow-production health.yourdomain.com
-
-# 5. Start the tunnel with the config file
-cloudflared tunnel --config ./cloudflare/config.yml run commitflow-production
-```
 
 ---
 
