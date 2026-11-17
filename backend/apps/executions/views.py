@@ -1,158 +1,141 @@
 import json
 import time
+from datetime import timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from django.db import transaction
+from django.db.models.functions import TruncDate
 from django.http import StreamingHttpResponse
-from rest_framework import generics, status
+from django.shortcuts import get_object_or_404
+from django.utils import timezone
+from rest_framework import generics
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from .models import Execution
-from .serializers import ExecutionSerializer
-from .tasks import execute_automation_task
+from rest_framework.throttling import ScopedRateThrottle
+from .models import Execution, PublishedChange
+from .serializers import ExecutionSerializer, ExecutionSummarySerializer
+from .tasks import enqueue_execution, configuration, snapshot_digest
+
 
 class ExecutionListView(generics.ListAPIView):
-    serializer_class = ExecutionSerializer
+    serializer_class = ExecutionSummarySerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        qs = Execution.objects.filter(automation__user=self.request.user)
+        qs = Execution.objects.filter(automation__user=self.request.user).select_related('automation__repository', 'published_change')
         automation_id = self.request.query_params.get('automation_id')
         if automation_id:
-            qs = qs.filter(automation_id=automation_id)
-        status_filter = self.request.query_params.get('status')
-        if status_filter:
-            qs = qs.filter(status=status_filter)
+            from django.core.exceptions import ValidationError
+            try:
+                qs = qs.filter(automation_id=automation_id)
+            except (ValueError, ValidationError):
+                return qs.none()
+        if self.request.query_params.get('status'):
+            qs = qs.filter(status=self.request.query_params['status'])
         return qs
+
 
 class ExecutionDetailView(generics.RetrieveAPIView):
     serializer_class = ExecutionSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return Execution.objects.filter(automation__user=self.request.user)
+        return Execution.objects.filter(automation__user=self.request.user).select_related(
+            'automation__repository', 'published_change').prefetch_related('generated_files')
+
+
+class ExecutionMetricsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            zone = ZoneInfo(request.query_params.get('timezone', 'UTC'))
+        except (ZoneInfoNotFoundError, ValueError):
+            return Response({'error': 'Invalid timezone.'}, status=400)
+        runs = Execution.objects.filter(automation__user=request.user)
+        days = set(runs.filter(status='SUCCESS').annotate(day=TruncDate('completed_at', tzinfo=zone)).values_list('day', flat=True))
+        today = timezone.now().astimezone(zone).date()
+        day = today if today in days else today - timedelta(days=1)
+        streak = 0
+        while day in days:
+            streak += 1
+            day -= timedelta(days=1)
+        checked = runs.filter(validation_results__has_key='is_valid')
+        checked_count = checked.count()
+        return Response(dict(streak_days=streak, active_automations=request.user.automations.filter(enabled=True).count(),
+            total_prs=PublishedChange.objects.filter(execution__automation__user=request.user, pull_request_url__isnull=False).count(),
+            validation_pass_rate=round(100 * checked.filter(validation_results__is_valid=True).count()/checked_count) if checked_count else None))
+
 
 class ExecutionStreamView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk=None):
-        """
-        Streams execution progress in real time via Server-Sent Events (SSE).
-        """
-        try:
-            execution = Execution.objects.get(pk=pk, automation__user=request.user)
-        except Execution.DoesNotExist:
-            return Response({"error": "Execution not found"}, status=status.HTTP_404_NOT_FOUND)
+        execution = get_object_or_404(Execution, pk=pk, automation__user=request.user)
 
         def event_stream():
-            last_status = None
-            last_step = None
-            attempts = 0
-
-            while attempts < 60: # Max 60 seconds
+            previous = None
+            for _ in range(60):
                 execution.refresh_from_db()
-                curr_status = execution.status
-                val_results = execution.validation_results or {}
-                curr_step = val_results.get("current_step", "")
-                step_msg = val_results.get("step_message", "")
-
-                if curr_status != last_status or curr_step != last_step:
-                    data = {
-                        "id": str(execution.id),
-                        "status": curr_status,
-                        "step": curr_step,
-                        "message": step_msg,
-                        "error": execution.error_message,
-                    }
-                    if curr_status == "SUCCESS" and hasattr(execution, 'published_change'):
-                        data["pr_url"] = execution.published_change.pull_request_url
-                        data["commit_sha"] = execution.published_change.commit_sha
-                    
-                    yield f"data: {json.dumps(data)}\n\n"
-                    last_status = curr_status
-                    last_step = curr_step
-
-                if curr_status in ["SUCCESS", "FAILED", "REJECTED", "AWAITING_APPROVAL"]:
+                payload = dict(id=str(execution.pk), status=execution.status,
+                               step=execution.validation_results.get('current_step', ''),
+                               message=execution.validation_results.get('step_message', ''), error=execution.error_message)
+                encoded = json.dumps(payload)
+                if encoded != previous:
+                    yield f'data: {encoded}\n\n'
+                    previous = encoded
+                else:
+                    yield ': heartbeat\n\n'
+                if execution.status in ('SUCCESS', 'FAILED', 'REJECTED', 'CANCELLED', 'AWAITING_APPROVAL'):
                     break
-
                 time.sleep(1)
-                attempts += 1
-
-        response = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
+        response = StreamingHttpResponse(event_stream(), content_type='text/event-stream')
         response['Cache-Control'] = 'no-cache'
         response['X-Accel-Buffering'] = 'no'
         return response
 
+
 class ExecutionApproveView(APIView):
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'run'
 
     def post(self, request, pk=None):
-        try:
-            execution = Execution.objects.get(pk=pk, automation__user=request.user)
+        if not isinstance(request.data, dict):
+            return Response({'error': 'A JSON object is required.'}, status=400)
+        with transaction.atomic():
+            execution = get_object_or_404(Execution.objects.select_for_update(of=('self',)), pk=pk, automation__user=request.user)
             if execution.status != 'AWAITING_APPROVAL':
-                return Response(
-                    {"error": f"Cannot approve execution in '{execution.status}' status."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            from apps.git_publishing.publisher import GitPublishingService
-            from apps.executions.models import PublishedChange
-            from apps.ai_engine.adapters.schemas import CodeProposal, ProposedFile
-            from django.utils import timezone
+                return Response({'error': 'This execution is not awaiting approval.'}, status=409)
+            if (not execution.snapshot or request.data.get('proposal_hash') != execution.proposal_hash
+                    or snapshot_digest(execution.snapshot) != execution.proposal_hash
+                    or execution.snapshot.get('configuration') != configuration(execution.automation)):
+                return Response({'error': 'Proposal or policy changed. Generate a new proposal.'}, status=409)
+            execution.approved_at = timezone.now()
+            execution.status = 'PENDING'
+            execution.save(update_fields=['approved_at', 'status'])
+        queued = enqueue_execution(execution)
+        execution.refresh_from_db()
+        return Response(ExecutionSerializer(execution).data, status=202 if queued else 503)
 
-            files = [
-                ProposedFile(path=gf.file_path, change_type=gf.change_type, content=gf.new_content)
-                for gf in execution.generated_files.all()
-            ]
-            proposal = CodeProposal(
-                summary="User approved commit",
-                commit_message="feat(auto): approved automated contribution",
-                pr_title=f"Habit Contribution [{execution.scheduled_slot}]",
-                pr_body="Automated contribution reviewed and approved by user.",
-                files=files
-            )
-
-            pub_result = GitPublishingService.publish(
-                repository=execution.automation.repository,
-                proposal=proposal,
-                branch_strategy=execution.automation.branch_strategy
-            )
-
-            if not pub_result.success:
-                execution.status = 'FAILED'
-                execution.error_message = pub_result.error or 'Failed to publish to GitHub'
-                execution.save()
-                return Response({"error": execution.error_message}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-            PublishedChange.objects.create(
-                execution=execution,
-                branch_name=pub_result.branch_name,
-                commit_sha=pub_result.commit_sha,
-                commit_message=proposal.commit_message,
-                pull_request_url=pub_result.pull_request_url,
-                pull_request_number=pub_result.pull_request_number
-            )
-            execution.status = 'SUCCESS'
-            execution.completed_at = timezone.now()
-            execution.save()
-
-            return Response(ExecutionSerializer(execution).data)
-
-        except Execution.DoesNotExist:
-            return Response({"error": "Execution not found"}, status=status.HTTP_404_NOT_FOUND)
 
 class ExecutionRetryView(APIView):
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'run'
 
     def post(self, request, pk=None):
-        try:
-            execution = Execution.objects.get(pk=pk, automation__user=request.user)
-            import datetime
-
-            new_slot = f"{execution.scheduled_slot}-retry-{int(datetime.datetime.now().timestamp())}"
-            task = execute_automation_task.delay(str(execution.automation.id), new_slot)
-            return Response({
-                "message": "Retry queued",
-                "task_id": task.id,
-                "new_slot": new_slot
-            })
-        except Execution.DoesNotExist:
-            return Response({"error": "Execution not found"}, status=status.HTTP_404_NOT_FOUND)
+        with transaction.atomic():
+            execution = get_object_or_404(Execution.objects.select_for_update(of=('self',)), pk=pk, automation__user=request.user)
+            if execution.status != 'FAILED' or execution.attempt_number >= 8:
+                return Response({'error': 'Only failed executions with fewer than eight attempts can be retried.'}, status=409)
+            if not execution.automation.enabled:
+                return Response({'error': 'Enable the automation before retrying.'}, status=409)
+            execution.status = 'PENDING'
+            execution.error_message = ''
+            execution.completed_at = None
+            execution.attempt_number += 1
+            execution.save(update_fields=['status', 'error_message', 'completed_at', 'attempt_number'])
+        queued = enqueue_execution(execution)
+        execution.refresh_from_db()
+        return Response(ExecutionSerializer(execution).data, status=202 if queued else 503)

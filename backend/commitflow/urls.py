@@ -1,9 +1,19 @@
 from django.contrib import admin
 from django.urls import path, include
 from django.http import JsonResponse
+from django.db import connection
+from django.core.cache import cache
 
 def health_check(request):
-    return JsonResponse({"status": "ok", "service": "commitflow-api"})
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT 1')
+        cache.set('commitflow:readiness', True, 10)
+        if cache.get('commitflow:readiness') is not True:
+            raise RuntimeError('Cache unavailable')
+    except Exception:
+        return JsonResponse({'status': 'unavailable'}, status=503)
+    return JsonResponse({'status': 'ok', 'service': 'commitflow-api'})
 
 urlpatterns = [
     path('health/', health_check, name='health-check'),

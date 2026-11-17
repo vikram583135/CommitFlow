@@ -1,158 +1,145 @@
-# CommitFlow 🚀
-**AI-Powered GitHub Activity Automation & Authentic Habit Engineering Platform**
+# CommitFlow
 
-CommitFlow is a full-stack SaaS platform that transforms daily GitHub activity from artificial vanity metrics into **authentic, verified engineering progress**. It connects to your GitHub repositories, ingests existing code context, generates high-quality practice implementations, documentation, and unit tests using AI, verifies the changes against strict security guardrails, and opens automated Pull Requests.
+CommitFlow proposes repository changes using a user-supplied AI provider, validates
+those changes, and publishes a pull request after approval. It uses Django, Celery,
+PostgreSQL/Redis, and a Next.js dashboard. The supported framework baselines are
+Django 5.2 LTS, Next.js 16, React 19, and Node 24 for container deployments.
 
----
+New rules require manual approval. Direct pushes always require approval. Missing
+credentials and failed provider operations return errors; there is no demo login
+or simulated publication in the application path.
 
-## 🌟 Key Features
+## Development
 
-- **Anti-Spam / Verified Contributions Only:** No empty commits, whitespace tweaks, or fake activity. Every commit is validated code or documentation with test assertions.
-- **Pull Request Default:** By default, changes are published to scoped branches (`automation/habit-{timestamp}`) with Pull Requests. Direct push is only allowed when explicitly opted-in.
-- **Real-Time Execution Stepper:** Real-time Server-Sent Events (SSE) stream 4-stage pipeline execution directly to the interactive drawer (Context Ingestion → AI Generation → Sandbox Validation → PR Publication).
-- **Social & Email Authentication:** Built-in support for GitHub OAuth, Google OAuth, and standard Email authentication.
-- **Pluggable AI Adapters:** Built-in adapters for **OpenAI** (`gpt-4o`, `gpt-4o-mini`), **Anthropic** (`claude-3-5-sonnet`), and **Google Gemini** with strict JSON Schema output.
-- **Security & Sandboxing:**
-  - **Fernet Symmetric Encryption:** GitHub tokens and AI provider API keys are encrypted at rest.
-  - **Path Boundary Guardrails:** Enforces `allowed_paths` whitelisting and eliminates directory traversal (`../`).
-  - **Blacklist Filter:** Disallows modifications to `.env*`, `Dockerfile`, keys, secrets, `.git/`, and CI workflows.
-  - **Secret Scanner:** Scans AI output for accidentally generated credentials before pushing to GitHub.
-- **Distributed Scheduling with Zero Duplicate Commits:** Powered by **Celery Beat** and **Redis** with database-backed slot uniqueness constraints (`(automation_id, scheduled_slot)`).
-- **Strict Luxury Monochrome UX:** High-contrast, minimalist `#000000` / `#09090b` aesthetic with zero distracting colorful neon artifacts.
-- **Cloudflare Ready:** Ready for deployment on **Cloudflare Pages** (Edge frontend) and **Cloudflare Tunnel** (`cloudflared` secure origin ingress).
+1. Copy `.env.example` to `.env`. Keep `DEBUG=True` locally. Generate an encryption
+   key before saving credentials:
 
----
-
-## 🛠 Tech Stack
-
-| Tier | Technology | Purpose |
-| :--- | :--- | :--- |
-| **Frontend** | Next.js 14, TypeScript, Tailwind CSS, Lucide Icons | Responsive dashboard, diff inspector, habit builder wizard, SSE drawer |
-| **Backend** | Django 5.x, Django REST Framework | Auth, models, REST APIs, business logic, cryptography, SSE streaming |
-| **Worker / Queue** | Celery 5.x, Redis 7.x, `django-celery-beat` | Distributed task execution, dynamic timezone scheduling, idempotency locks |
-| **Database** | PostgreSQL 16 (SQLite fallback for local dev) | Multi-tenant schema with UUIDv4 primary keys |
-| **GitHub Access** | GitHub App / GitHub REST Data API | Granular contents & pull requests permissions |
-| **AI Layer** | Multi-model adapter pattern + Pydantic v2 schemas | Structured code proposals matching schema |
-| **Deployment** | Cloudflare Pages + Cloudflare Tunnel | Global CDN, edge caching, zero open firewall ports |
-
----
-
-## 🚀 Quick Start
-
-### Option A: Run with Docker Compose (Recommended)
-
-1. Clone the repository and configure your environment:
-   ```bash
-   cp .env.example .env
+   ```powershell
+   backend\.venv\Scripts\python.exe -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
    ```
 
-2. Start the entire platform (PostgreSQL, Redis, Django, Celery Worker, Celery Beat, Next.js):
-   ```bash
-   docker compose -f docker/docker-compose.yml up --build
+2. For Docker, set a database password and start the stack explicitly using the root
+   environment file:
+
+   ```powershell
+   docker compose --env-file .env -f docker/docker-compose.yml up --build
    ```
 
-3. Open your browser:
-   - **Frontend Dashboard:** [http://localhost:3000](http://localhost:3000)
-   - **Backend REST API:** [http://localhost:8000/api/](http://localhost:8000/api/)
-   - **Health Check Probe:** [http://localhost:8000/api/health/](http://localhost:8000/api/health/)
-   - **Django Admin:** [http://localhost:8000/admin/](http://localhost:8000/admin/)
+   Open http://localhost:3000. Database and Redis ports are private to the Compose
+   network. The API binds to localhost:8000. No public tunnel starts by default.
 
----
+3. To run the backend directly, install `backend/requirements.txt` in a virtual
+   environment, set `USE_SQLITE=True`, then run:
 
-### Option B: Run Locally Without Docker
+   ```powershell
+   cd backend
+   python manage.py migrate
+   python manage.py reconcile_schedules
+   python manage.py runserver
+   ```
 
-#### 1. Backend Setup
-```bash
+   Start Celery worker and Beat separately for queued/scheduled executions. A
+   broker connection alone does not mean a worker is online. Production workers
+   run on Linux; local API development and tests work on Windows.
+
+4. Start the frontend with its existing `dev` script. Its API rewrite targets
+   `http://127.0.0.1:8000` locally; `API_INTERNAL_URL` selects another backend.
+   `NEXT_PUBLIC_API_URL` is optional and intended for a separately hosted API.
+
+Email registration requires verification. In development, verification and password
+reset links appear in backend console output. Existing unverified accounts can use
+**Resend verification email** in the sign-in dialog. Production requires SMTP.
+
+## Provider setup
+
+- GitHub/Google sign-in requires real OAuth client IDs and secrets. Register the
+  exact callback `${FRONTEND_URL}/auth/callback`; there are no credential fallbacks.
+- OAuth uses single-use state, a browser-held PKCE verifier, and verified provider
+  emails. Existing accounts must sign in before linking another provider.
+- A GitHub App additionally needs its App ID and private key. Installation linking
+  requires a verified GitHub user connection and installation ownership or
+  organization administrator membership. The webhook secret is mandatory for
+  webhook processing.
+- Save an AI key through **AI Config**. **Save & Test** performs a real model request.
+  OpenAI, Anthropic, and Gemini route to their corresponding provider endpoints.
+  Model availability depends on your provider account.
+
+## Execution guarantees and limits
+
+- Related repositories and AI configurations are scoped to their owner, including
+  a second ownership check in the worker.
+- Allowed directories use repository-relative `/` paths, such as `src/, tests/`.
+  Empty boundaries, sibling-prefix escapes, sensitive files, duplicate paths,
+  common credential patterns, excessive file counts, and unchanged files fail
+  validation. These rules do not replace a maintained external secret scanner.
+- Context is pinned to a Git commit. Only files whose complete contents were read
+  can be modified. Context is bounded to 15 text files / 150 KB and a 10,000-entry
+  nontruncated tree; larger repositories need narrower task scopes or an extended
+  context selection implementation.
+- Proposals record their target, base commit, policy, contents, metadata, and hash.
+  Approval applies to that snapshot. Policy changes invalidate it. Modified target
+  branches are rejected before a new publication.
+- Execution claims are atomic. Manual request keys and deterministic branches
+  prevent duplicate publication when requests or queue deliveries repeat. A retry
+  reconciles the original branch/PR instead of generating a replacement proposal.
+- Transient provider failures retry with backoff. Interrupted workers become failed
+  after 15 minutes and can be retried. A new run is needed to regenerate stale or
+  rejected proposals. Queue failures never execute the pipeline inside an HTTP
+  request.
+- `MAX_DAILY_EXECUTIONS` limits AI generation attempts per user over a rolling
+  24-hour window. Generation output is also bounded. This is a request budget,
+  not a dollar-denominated spending guarantee. Provider billing remains external.
+- Cron uses five fields and an IANA timezone. Schedules are registered in Celery
+  Beat. Slots missed by more than five minutes are skipped; repeated local clock
+  slots during DST changes deduplicate. Run exactly one Beat scheduler.
+- The dashboard polls execution details and shows real validation results and
+  diffs. Aggregate metrics cover all records, not just the current history page.
+
+## Generated-code validation
+
+Default checks are static: path policy, common secrets, substantive changes, and
+Python/JSON syntax. They do not execute generated code or prove correctness. Other
+languages still require a reviewer and repository CI.
+
+An optional Python `unittest` runner is available with `ENABLE_PYTHON_SANDBOX=True`.
+Run the validation worker directly on a dedicated Linux Docker host so its staging
+directory is visible to the Docker daemon. It requires a preloaded
+`PYTHON_SANDBOX_IMAGE`. Prefer a pinned image digest. The application never pulls
+images automatically. The runner has no network, a read-only source mount/root,
+no application secrets, an unprivileged user, dropped capabilities, and CPU,
+memory, process, temporary-storage, output, and time limits. It rejects proposals
+when no tests run, tests fail, or Docker is unavailable. Dependencies must already
+exist in the chosen image. The default Compose deployment does not mount a Docker
+socket into the worker; enable this only on an isolated validation worker host.
+
+## Tests
+
+Tests use an in-memory database and synthetic credentials, with no provider calls:
+
+```powershell
 cd backend
-python -m venv .venv
-
-# On Windows:
-.venv\Scripts\activate
-# On Linux/macOS:
-source .venv/bin/activate
-
-pip install -r requirements.txt
-
-# Run migrations (uses SQLite if PostgreSQL is not active)
-$env:USE_SQLITE="True"  # (PowerShell) or export USE_SQLITE=True
-python manage.py migrate
-
-# Run tests
-python manage.py test tests
-
-# Start Django development server
-python manage.py runserver 0.0.0.0:8000
+python -B manage.py test tests --settings=commitflow.test_settings
+python -B manage.py makemigrations --check --dry-run --settings=commitflow.test_settings
 ```
 
-#### 2. Frontend Setup
-```bash
-cd frontend
-npm install
-npm run dev
-```
+Frontend type/build checks use `npm run typecheck` and `npm run build`.
+GitHub regression tests exercise real HTTP request construction through a mocked
+transport, including denied pushes, stale branches, and ambiguous PR creation.
+The CI workflow runs the concurrency tests against PostgreSQL. To run that job
+locally, point `TEST_POSTGRES_*` variables at a disposable database and use
+`--settings=commitflow.postgres_test_settings`. Live provider/tunnel behavior also
+requires deployment integration testing.
 
-Visit [http://localhost:3000](http://localhost:3000) to access the interactive dashboard.
+## Upgrading an existing installation
 
----
+Back up the database and existing encryption key first. Stop workers/Beat, deploy
+matching backend/frontend code, run migrations and `reconcile_schedules`, then
+restart workers/Beat. Old proposals without an immutable snapshot must be
+regenerated. Existing rules are moved to manual approval, and legacy App
+installations are paused until ownership is verified again. Existing email accounts need verification; valid social sign-in
+verifies the matching email. Retain the original encryption key to read stored
+credentials. Changing it without a rotation/migration makes those records unreadable.
 
-## 📁 Repository Structure
-
-```
-CommitFlow/
-├── backend/
-│   ├── apps/
-│   │   ├── authentication/       # User model, token auth, Google/GitHub OAuth handlers
-│   │   ├── github_integration/   # GitHub App, installation tokens, repo syncing
-│   │   ├── ai_engine/            # AI provider adapters (OpenAI, Anthropic, Gemini)
-│   │   ├── automations/          # Habit goals, schedules, CRUD APIs, trigger endpoints
-│   │   ├── executions/           # Celery tasks, SSE streaming, diff records, retry logic
-│   │   ├── validation/           # Path boundary, secret scanner, diff checker
-│   │   ├── git_publishing/       # GitHub Git Data API (trees, blobs, commits, PRs)
-│   │   └── common/               # Fernet symmetric encryption and secret masking
-│   ├── commitflow/               # Django settings, Celery, URLs, health check
-│   ├── tests/                    # Backend unit & integration test suite
-│   ├── requirements.txt
-│   └── manage.py
-├── frontend/
-│   ├── src/
-│   │   ├── app/                  # Next.js App Router (layout, globals, dashboard)
-│   │   ├── components/           # Header, MetricCards, DiffViewer, Modals, Stepper Drawer
-│   │   ├── lib/                  # API client with token authorization
-│   │   └── types/                # TypeScript interface definitions
-│   ├── package.json
-│   └── tailwind.config.ts
-├── cloudflare/
-│   ├── config.yml                # Cloudflare Tunnel routing configuration
-│   └── README.md                 # Cloudflare Pages & Tunnel deployment guide
-├── docker/
-│   ├── Dockerfile.backend
-│   ├── Dockerfile.frontend
-│   └── docker-compose.yml
-├── .env.example
-└── README.md
-```
-
----
-
-## 🧪 Testing
-
-The backend includes comprehensive test coverage verifying:
-- Secret encryption/decryption roundtrip and UI masking
-- Path traversal rejection (`../../` escape attempts)
-- Restricted file modification rejection (`.env*`, workflows, etc.)
-- Allowed path boundary verification
-- Complete Celery execution task pipeline from context to Git PR publication
-
-Run the tests anytime:
-```bash
-cd backend
-python manage.py test tests
-```
-
----
-
-## 🌐 Production Deployment
-
-See [cloudflare/README.md](cloudflare/README.md) for full instructions on deploying CommitFlow using:
-- **Cloudflare Pages** for the Next.js static/edge frontend
-- **Cloudflare Tunnel (`cloudflared`)** for secure, outbound-only connectivity to the backend API without exposing open ports
+The previously embedded tunnel token must be revoked if it was ever used. Removing
+it from this working tree does not revoke it or remove copies from Git history.
+See [deployment instructions](cloudflare/README.md).

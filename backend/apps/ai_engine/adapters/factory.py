@@ -13,7 +13,7 @@ def get_ai_adapter(config: AIProviderConfig) -> BaseAIAdapter:
     elif provider == 'anthropic':
         return AnthropicAdapter(api_key=api_key, model_name=model)
     elif provider == 'gemini':
-        # Can fallback to OpenAI-compatible or google-genai
-        return OpenAIAdapter(api_key=api_key, model_name=model)
+        return OpenAIAdapter(api_key=api_key, model_name=model,
+                             base_url='https://generativelanguage.googleapis.com/v1beta/openai/')
     else:
         raise ValueError(f"Unsupported AI provider: {provider}")

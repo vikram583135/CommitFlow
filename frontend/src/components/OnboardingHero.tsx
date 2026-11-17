@@ -21,7 +21,7 @@ export const OnboardingHero: React.FC<OnboardingHeroProps> = ({
       <div className="max-w-2xl">
         <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded bg-zinc-900 border border-zinc-800 text-[11px] font-mono text-zinc-300 mb-3">
           <Sparkles className="w-3.5 h-3.5 text-white" />
-          <span>PRODUCTION ONBOARDING</span>
+          <span>GETTING STARTED</span>
         </div>
         <h2 className="text-xl font-bold tracking-tight text-white font-mono uppercase">
           Welcome to CommitFlow

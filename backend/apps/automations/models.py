@@ -29,7 +29,7 @@ class Automation(models.Model):
     timezone = models.CharField(max_length=50, default='UTC')
     
     branch_strategy = models.CharField(max_length=50, choices=BRANCH_STRATEGY_CHOICES, default='PULL_REQUEST')
-    require_approval = models.BooleanField(default=False)
+    require_approval = models.BooleanField(default=True)
     max_files = models.IntegerField(default=3)
     enabled = models.BooleanField(default=True)
     

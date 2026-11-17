@@ -11,6 +11,7 @@ class GitHubConnection(models.Model):
     installation_id = models.CharField(max_length=100, blank=True)
     encrypted_access_token = models.TextField(blank=True)
     token_expires_at = models.DateTimeField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -43,3 +44,8 @@ class Repository(models.Model):
 
     def __str__(self):
         return self.full_name
+
+
+class WebhookDelivery(models.Model):
+    body_hash = models.CharField(max_length=64, primary_key=True)
+    received_at = models.DateTimeField(auto_now_add=True)

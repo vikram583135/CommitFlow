@@ -31,7 +31,7 @@ export const Header: React.FC<HeaderProps> = ({
             <div className="flex items-center gap-2">
               <span className="font-semibold text-sm tracking-tight text-white uppercase font-mono">CommitFlow</span>
               <span className="text-[10px] font-mono tracking-wider bg-zinc-900 text-zinc-300 border border-zinc-700 rounded px-1.5 py-0.2">
-                PROD
+                REVIEW
               </span>
             </div>
             <p className="text-[11px] text-zinc-400">Autonomous Engineering Habit Pipeline</p>

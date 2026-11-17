@@ -24,6 +24,11 @@ class ExecutionSerializer(serializers.ModelSerializer):
             'status', 'scheduled_slot', 'idempotency_key', 'attempt_number',
             'input_tokens', 'output_tokens', 'validation_results',
             'error_message', 'started_at', 'completed_at',
-            'generated_files', 'published_change'
+            'generated_files', 'published_change', 'proposal_hash', 'approved_at'
         ]
         read_only_fields = ['id', 'started_at', 'completed_at']
+
+
+class ExecutionSummarySerializer(ExecutionSerializer):
+    class Meta(ExecutionSerializer.Meta):
+        fields = [field for field in ExecutionSerializer.Meta.fields if field != 'generated_files']

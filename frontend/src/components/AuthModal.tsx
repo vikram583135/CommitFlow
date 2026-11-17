@@ -1,15 +1,17 @@
 import React, { useState } from 'react';
 import { X, Github, Mail, ArrowRight } from 'lucide-react';
-import { loginWithEmail, registerWithEmail, handleOAuthCallback, getOAuthUrl } from '../lib/api';
+import { loginWithEmail, registerWithEmail, getOAuthUrl, requestPasswordReset, apiRequest } from '../lib/api';
 
 interface AuthModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSuccess: (user: any) => void;
+  linking?: boolean;
 }
 
-export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess }) => {
-  const [mode, setMode] = useState<'login' | 'register'>('login');
+export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess, linking=false }) => {
+  const [mode, setMode] = useState<'login' | 'register' | 'reset'>('login');
+  const [notice, setNotice] = useState<string | null>(null);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
@@ -22,13 +24,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
     e.preventDefault();
     setIsLoading(true);
     setError(null);
+    setNotice(null);
     try {
       let data;
       if (mode === 'login') {
         data = await loginWithEmail(email, password);
-      } else {
+      } else if (mode === 'register') {
         data = await registerWithEmail(email, password, name);
+      } else {
+        const result = await requestPasswordReset(email);
+        setNotice(result.message);
+        return;
       }
+      setPassword('');
+      if (!data.token) { setNotice(data.message || 'Check your email.'); return; }
       onSuccess(data.user);
       onClose();
     } catch (err: any) {
@@ -42,18 +51,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
     setIsLoading(true);
     setError(null);
     try {
-      // 1. Fetch provider auth url
       const data = await getOAuthUrl(provider);
-      if (data?.url && !data.url.includes('demo_')) {
-        // Real OAuth credentials configured -> redirect to GitHub / Google
-        window.location.href = data.url;
-        return;
-      }
-
-      // 2. Dev mode fallback when credentials are not yet configured
-      const authData = await handleOAuthCallback(provider, 'dev_code');
-      onSuccess(authData.user);
-      onClose();
+      window.location.href = data.url;
     } catch (err: any) {
       setError(err.message || `Failed to sign in with ${provider}`);
     } finally {
@@ -67,7 +66,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
         <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
           <div>
             <h2 className="text-sm font-mono uppercase tracking-wider font-semibold text-white">
-              {mode === 'login' ? 'Sign In to CommitFlow' : 'Create Account'}
+              {linking ? 'Connect a social account' : mode === 'login' ? 'Sign In to CommitFlow' : mode === 'reset' ? 'Reset Password' : 'Create Account'}
             </h2>
             <p className="text-[11px] text-zinc-400">Authentic Habit Engineering Platform</p>
           </div>
@@ -81,6 +80,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
             {error}
           </div>
         )}
+        {notice && <p role="status" className="mt-3 text-xs text-zinc-300">{notice}</p>}
 
         <div className="mt-4 space-y-2">
           {/* GitHub Social Auth */}
@@ -106,17 +106,17 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
           </button>
         </div>
 
-        <div className="relative my-4">
+        {!linking && <><div className="relative my-4">
           <div className="absolute inset-0 flex items-center">
             <div className="w-full border-t border-zinc-900" />
           </div>
           <div className="relative flex justify-center text-[10px] uppercase font-mono">
             <span className="bg-zinc-950 px-2 text-zinc-500">OR EMAIL</span>
           </div>
-        </div>
+        </div></>}
 
         {/* Email/Password Form */}
-        <form onSubmit={handleSubmit} className="space-y-3">
+        {!linking && <form onSubmit={handleSubmit} className="space-y-3">
           {mode === 'register' && (
             <div>
               <label className="block text-[10px] font-mono text-zinc-400 mb-1">FULL NAME</label>
@@ -143,7 +143,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
             />
           </div>
 
-          <div>
+          {mode !== 'reset' && <div>
             <label className="block text-[10px] font-mono text-zinc-400 mb-1">PASSWORD</label>
             <input
               type="password"
@@ -153,19 +153,26 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
               className="w-full px-3 py-1.5 text-xs rounded bg-black border border-zinc-800 text-white font-mono focus:outline-none focus:border-zinc-500"
               required
             />
-          </div>
+          </div>}
 
           <button
             type="submit"
             disabled={isLoading}
             className="w-full flex items-center justify-center gap-1.5 px-3 py-2 mt-2 text-xs font-mono font-medium text-white bg-zinc-800 hover:bg-zinc-700 rounded transition-colors"
           >
-            <span>{mode === 'login' ? 'SIGN IN' : 'CREATE ACCOUNT'}</span>
+            <span>{mode === 'login' ? 'SIGN IN' : mode === 'reset' ? 'SEND RESET LINK' : 'CREATE ACCOUNT'}</span>
             <ArrowRight className="w-3.5 h-3.5" />
           </button>
-        </form>
+          <button type="button" onClick={() => {setMode('reset');setError(null);setNotice(null);}}
+            className="block mx-auto mt-3 text-[11px] text-zinc-400">Forgot password?</button>
+          <button type="button" disabled={isLoading || !email} onClick={async()=>{
+            setIsLoading(true);setError(null);
+            try {const result=await apiRequest<{message:string}>('/api/auth/resend-verification/',{method:'POST',body:JSON.stringify({email})});setNotice(result.message);}
+            catch(err){setError((err as Error).message);}finally{setIsLoading(false);}
+          }} className="block mx-auto mt-3 text-[11px] text-zinc-400">Resend verification email</button>
+        </form>}
 
-        <div className="mt-4 pt-3 border-t border-zinc-900 text-center">
+        {!linking && <div className="mt-4 pt-3 border-t border-zinc-900 text-center">
           <button
             type="button"
             onClick={() => setMode(mode === 'login' ? 'register' : 'login')}
@@ -173,7 +180,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
           >
             {mode === 'login' ? "Don't have an account? Sign up" : 'Already have an account? Sign in'}
           </button>
-        </div>
+        </div>}
       </div>
     </div>
   );

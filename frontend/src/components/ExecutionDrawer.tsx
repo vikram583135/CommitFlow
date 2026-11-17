@@ -1,12 +1,14 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { X, CheckCircle2, AlertCircle, Loader2, ExternalLink, Terminal } from 'lucide-react';
 import { Execution } from '../types';
+import { fetchExecution } from '../lib/api';
 
 interface ExecutionDrawerProps {
   isOpen: boolean;
   onClose: () => void;
   executionId: string | null;
-  onViewDiff: () => void;
+  onViewDiff: (id:string) => void;
+  onUpdate: (execution:Execution) => void;
 }
 
 interface StepLog {
@@ -20,12 +22,15 @@ export const ExecutionDrawer: React.FC<ExecutionDrawerProps> = ({
   onClose,
   executionId,
   onViewDiff,
+  onUpdate,
 }) => {
   const [logs, setLogs] = useState<string[]>([]);
   const [currentStep, setCurrentStep] = useState<string>('STARTING');
   const [execStatus, setExecStatus] = useState<string>('RUNNING');
   const [prUrl, setPrUrl] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const updateRef = useRef(onUpdate);
+  updateRef.current = onUpdate;
 
   useEffect(() => {
     if (!isOpen || !executionId) return;
@@ -36,28 +41,25 @@ export const ExecutionDrawer: React.FC<ExecutionDrawerProps> = ({
     setPrUrl(null);
     setErrorMessage(null);
 
-    const token = typeof window !== 'undefined' ? localStorage.getItem('commitflow_token') : null;
-    const url = `/api/executions/${executionId}/stream/`;
-
-    const pollInterval = setInterval(async () => {
+    let stopped=false;
+    let timer:ReturnType<typeof setTimeout>;
+    let lastMessage='';
+    const started=Date.now();
+    const controller=new AbortController();
+    const poll = async () => {
       try {
-        const res = await fetch(`/api/executions/${executionId}/`, {
-          headers: token ? { Authorization: `Token ${token}` } : {},
-        });
-        if (res.ok) {
-          const data = await res.json();
+          const data = await fetchExecution(executionId,controller.signal);
+          if(stopped) return;
+          updateRef.current(data);
           setExecStatus(data.status);
-          const val = data.validation_results || {};
-          const step = val.current_step || data.status;
+          const val = data.validation_results;
+          const step = val?.current_step || data.status;
           setCurrentStep(step);
 
-          if (val.step_message) {
-            setLogs((prev) => {
-              if (!prev.includes(val.step_message)) {
-                return [...prev, `[${new Date().toLocaleTimeString()}] ${val.step_message}`];
-              }
-              return prev;
-            });
+          if (val?.step_message && val.step_message !== lastMessage) {
+            const message=val.step_message;
+            setLogs(prev=>[...prev, `[${new Date().toLocaleTimeString()}] ${message}`]);
+            lastMessage=message;
           }
 
           if (data.published_change?.pull_request_url) {
@@ -68,16 +70,19 @@ export const ExecutionDrawer: React.FC<ExecutionDrawerProps> = ({
             setErrorMessage(data.error_message);
           }
 
-          if (['SUCCESS', 'FAILED', 'REJECTED'].includes(data.status)) {
-            clearInterval(pollInterval);
+          if (['SUCCESS', 'FAILED', 'REJECTED', 'CANCELLED', 'AWAITING_APPROVAL'].includes(data.status)) {
+            return;
           }
-        }
       } catch (e) {
-        // Continue polling
+        if(stopped) return;
+        setErrorMessage((e as Error).message);
+        return;
       }
-    }, 1500);
-
-    return () => clearInterval(pollInterval);
+      if(Date.now()-started>600000) {setErrorMessage('Progress monitoring timed out. Reopen the execution to check its status.');return;}
+      timer=setTimeout(poll,1500);
+    };
+    poll();
+    return () => {stopped=true;clearTimeout(timer);controller.abort();};
   }, [isOpen, executionId]);
 
   if (!isOpen) return null;
@@ -94,7 +99,7 @@ export const ExecutionDrawer: React.FC<ExecutionDrawerProps> = ({
     },
     {
       title: 'AI Code & Test Generation',
-      desc: 'Prompting LLM with anti-duplication memory and structured JSON schema',
+      desc: 'Generating bounded proposals using existing source and recent contribution history',
       status: currentStep === 'GENERATING_CHANGES'
         ? 'active'
         : ['VALIDATING_SAFETY', 'PUBLISHING_PULL_REQUEST', 'SUCCESS'].includes(currentStep)
@@ -104,8 +109,8 @@ export const ExecutionDrawer: React.FC<ExecutionDrawerProps> = ({
         : 'pending',
     },
     {
-      title: 'Security Sandbox & Secret Scan',
-      desc: 'Path whitelisting, blacklist check (.env/keys), and diff quality verification',
+      title: 'Static Validation & Secret Scan',
+      desc: 'Path boundaries, sensitive files, syntax, and substantive change checks',
       status: currentStep === 'VALIDATING_SAFETY'
         ? 'active'
         : ['PUBLISHING_PULL_REQUEST', 'SUCCESS'].includes(currentStep)
@@ -202,7 +207,7 @@ export const ExecutionDrawer: React.FC<ExecutionDrawerProps> = ({
           <div className="flex gap-2">
             <button
               onClick={() => {
-                onViewDiff();
+                if(executionId) onViewDiff(executionId);
                 onClose();
               }}
               className="px-3 py-1.5 text-xs font-mono text-zinc-300 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded transition-colors"

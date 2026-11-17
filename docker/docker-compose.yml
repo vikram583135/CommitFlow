@@ -1,120 +1,117 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: commitflow_postgres
+    networks: [data]
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-commitflow}
       POSTGRES_USER: ${POSTGRES_USER:-commitflow_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-commitflow_password}
-    ports:
-      - "5432:5432"
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the environment or root .env}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-commitflow_user} -d ${POSTGRES_DB:-commitflow}"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   redis:
     image: redis:7-alpine
-    container_name: commitflow_redis
+    networks: [data]
     restart: unless-stopped
-    ports:
-      - "6379:6379"
+    command: redis-server --appendonly yes
     volumes:
       - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+
+  migrate:
+    networks: [data]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    command: sh -c "python manage.py migrate --noinput && python manage.py reconcile_schedules && python manage.py collectstatic --noinput"
+    env_file: ../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   backend:
+    networks: [data, web]
     build:
       context: ..
       dockerfile: docker/Dockerfile.backend
-    container_name: commitflow_backend
     restart: unless-stopped
-    command: >
-      sh -c "python manage.py migrate &&
-             python manage.py runserver 0.0.0.0:8000"
-    volumes:
-      - ../backend:/app
+    env_file: ../.env
     ports:
-      - "8000:8000"
-    env_file:
-      - ../.env
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health/', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      retries: 10
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   celery_worker:
+    networks: [data]
     build:
       context: ..
       dockerfile: docker/Dockerfile.backend
-    container_name: commitflow_celery_worker
     restart: unless-stopped
-    command: celery -A commitflow worker -l info -c 4
-    volumes:
-      - ../backend:/app
-    env_file:
-      - ../.env
+    command: celery -A commitflow worker -l info -c 2
+    env_file: ../.env
     depends_on:
       backend:
-        condition: service_started
-      redis:
-        condition: service_healthy
-      postgres:
         condition: service_healthy
 
   celery_beat:
+    networks: [data]
     build:
       context: ..
       dockerfile: docker/Dockerfile.backend
-    container_name: commitflow_celery_beat
     restart: unless-stopped
-    command: celery -A commitflow beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
-    volumes:
-      - ../backend:/app
-    env_file:
-      - ../.env
+    command: celery -A commitflow beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler --pidfile=/tmp/celerybeat.pid
+    env_file: ../.env
     depends_on:
       backend:
-        condition: service_started
-      redis:
-        condition: service_healthy
-      postgres:
         condition: service_healthy
 
   frontend:
+    networks: [web]
     build:
       context: ..
       dockerfile: docker/Dockerfile.frontend
-    container_name: commitflow_frontend
     restart: unless-stopped
-    volumes:
-      - ../frontend:/app
-      - /app/node_modules
-      - /app/.next
     ports:
-      - "3000:3000"
-    environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - "127.0.0.1:3000:3000"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
   cloudflared:
+    networks: [web]
     image: cloudflare/cloudflared:latest
-    container_name: commitflow_tunnel
+    profiles: ["tunnel"]
     restart: unless-stopped
-    command: tunnel --no-autoupdate --url http://backend:8000
+    env_file: ../.env
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
     depends_on:
-      - backend
+      frontend:
+        condition: service_started
 
 volumes:
   postgres_data:
   redis_data:
+
+networks:
+  data:
+  web:

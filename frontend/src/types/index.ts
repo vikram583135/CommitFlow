@@ -31,6 +31,7 @@ export interface Automation {
   require_approval: boolean;
   max_files: number;
   enabled: boolean;
+  allowed_paths?: string[];
   last_run_at?: string;
   next_run_at?: string;
 }
@@ -59,17 +60,23 @@ export interface Execution {
   automation: string;
   automation_title: string;
   repository_name: string;
-  status: 'PENDING' | 'RUNNING' | 'AWAITING_APPROVAL' | 'SUCCESS' | 'FAILED' | 'REJECTED';
+  status: 'PENDING' | 'RUNNING' | 'PUBLISHING' | 'CANCELLED' | 'AWAITING_APPROVAL' | 'SUCCESS' | 'FAILED' | 'REJECTED';
   scheduled_slot: string;
   attempt_number: number;
   validation_results?: {
     is_valid: boolean;
     errors: string[];
     warnings: string[];
+    checks?: Record<string, boolean>;
+    current_step?: string;
+    step_message?: string;
+    sandbox?: {passed:boolean;tests_run?:number;message:string};
   };
   error_message?: string;
   started_at: string;
   completed_at?: string;
-  generated_files: GeneratedFile[];
+  generated_files?: GeneratedFile[];
+  proposal_hash?: string;
+  approved_at?: string;
   published_change?: PublishedChange;
 }

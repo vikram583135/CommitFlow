@@ -2,6 +2,7 @@ from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.throttling import ScopedRateThrottle
 from .models import AIProviderConfig
 from .serializers import AIProviderConfigSerializer
 from .adapters import get_ai_adapter
@@ -25,6 +26,8 @@ class AIProviderConfigDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 class AIProviderTestConnectionView(APIView):
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'run'
 
     def post(self, request, pk=None):
         try:
@@ -34,5 +37,5 @@ class AIProviderTestConnectionView(APIView):
             return Response({"success": is_valid})
         except AIProviderConfig.DoesNotExist:
             return Response({"error": "Config not found"}, status=status.HTTP_404_NOT_FOUND)
-        except Exception as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            return Response({'error': 'Provider connection failed. Check the key and model.'}, status=400)

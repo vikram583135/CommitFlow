@@ -1,132 +1,128 @@
-import time
-import httpx
+"""Idempotent publication onto a deterministic execution branch."""
+from dataclasses import dataclass
 from typing import Optional
-from apps.github_integration.models import Repository
-from apps.ai_engine.adapters.schemas import CodeProposal
+from urllib.parse import quote
+import httpx
+from apps.github_integration.services import GitHubAppService, GitHubAPIError, github_json
+from apps.validation.validator import canonical_path
 
+
+@dataclass
 class GitPublisherResult:
-    def __init__(self, success: bool, branch_name: str, commit_sha: str, pull_request_url: Optional[str] = None, pull_request_number: Optional[int] = None, error: Optional[str] = None):
-        self.success = success
-        self.branch_name = branch_name
-        self.commit_sha = commit_sha
-        self.pull_request_url = pull_request_url
-        self.pull_request_number = pull_request_number
-        self.error = error
+    success: bool
+    branch_name: str = ''
+    commit_sha: str = ''
+    pull_request_url: Optional[str] = None
+    pull_request_number: Optional[int] = None
+    error: Optional[str] = None
+    retryable: bool = False
+
 
 class GitPublishingService:
     @staticmethod
-    def publish(repository: Repository, proposal: CodeProposal, branch_strategy: str = "PULL_REQUEST") -> GitPublisherResult:
-        token = repository.connection.get_access_token()
-        repo_full_name = repository.full_name
-        timestamp = int(time.time())
-        branch_name = f"automation/habit-{timestamp}"
-
-        # If testing or no actual token configured, generate simulated verified commit
-        if not token or token == "demo-token" or "demo" in repository.connection.installation_id:
-            return GitPublisherResult(
-                success=True,
-                branch_name=branch_name,
-                commit_sha=f"simulated-{timestamp:x}abcdef123456",
-                pull_request_url=f"https://github.com/{repo_full_name}/pull/{timestamp % 1000}",
-                pull_request_number=timestamp % 1000
-            )
-
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github.v3+json"
-        }
-        base_url = f"https://api.github.com/repos/{repo_full_name}"
-
-        with httpx.Client(timeout=30.0) as client:
-            try:
-                # 1. Get base branch commit SHA
-                ref_resp = client.get(f"{base_url}/git/ref/heads/{repository.default_branch}", headers=headers)
-                ref_resp.raise_for_status()
-                base_sha = ref_resp.json()["object"]["sha"]
-
-                # 2. Create blobs and tree
+    def publish(repository, proposal, branch_strategy='PULL_REQUEST', *, execution_id, base_sha,
+                base_tree_sha, file_modes=None, commit_date):
+        branch = f'automation/habit-{execution_id}'
+        result = GitPublisherResult(False, branch_name=branch)
+        try:
+            if branch_strategy not in ('PULL_REQUEST', 'DIRECT_PUSH') or not base_sha or not base_tree_sha:
+                raise GitHubAPIError('Missing or invalid publication snapshot.')
+            token = GitHubAppService.get_effective_token(repository.connection, repository.github_repo_id)
+            root = f'/repos/{repository.full_name}'
+            target_ref = quote(repository.default_branch, safe='/')
+            with httpx.Client(timeout=30) as client:
+                base = github_json(client, 'GET', f'{root}/git/commits/{base_sha}', token)
+                if base['tree']['sha'] != base_tree_sha:
+                    raise GitHubAPIError('Base tree does not match the approved snapshot.')
                 tree_items = []
                 for file in proposal.files:
-                    blob_resp = client.post(
-                        f"{base_url}/git/blobs",
-                        headers=headers,
-                        json={"content": file.content, "encoding": "utf-8"}
-                    )
-                    blob_resp.raise_for_status()
-                    tree_items.append({
-                        "path": file.path,
-                        "mode": "100644",
-                        "type": "blob",
-                        "sha": blob_resp.json()["sha"]
+                    path = canonical_path(file.path)
+                    mode = (file_modes or {}).get(path, '100644')
+                    if mode not in ('100644', '100755'):
+                        raise GitHubAPIError('Symlinks and submodules cannot be modified.')
+                    blob = github_json(client, 'POST', f'{root}/git/blobs', token,
+                                       json={'content': file.content, 'encoding': 'utf-8'})
+                    tree_items.append(dict(path=path, mode=mode, type='blob', sha=blob['sha']))
+                tree = github_json(client, 'POST', f'{root}/git/trees', token,
+                                   json={'base_tree': base_tree_sha, 'tree': tree_items})
+                if tree['sha'] == base_tree_sha:
+                    raise GitHubAPIError('No repository changes were produced.')
+
+                def existing_branch():
+                    try:
+                        return github_json(client, 'GET', f'{root}/git/ref/heads/{branch}', token)['object']['sha']
+                    except GitHubAPIError as exc:
+                        if str(exc) == 'GitHub request failed (HTTP 404).':
+                            return None
+                        raise
+
+                def verify_commit(sha):
+                    commit = github_json(client, 'GET', f'{root}/git/commits/{sha}', token)
+                    if (commit['tree']['sha'] != tree['sha'] or commit.get('message') != proposal.commit_message
+                            or [p['sha'] for p in commit.get('parents', [])] != [base_sha]):
+                        raise GitHubAPIError('Execution branch changed. Refusing to overwrite it.')
+
+                commit_sha = existing_branch()
+                if commit_sha:
+                    verify_commit(commit_sha)
+                else:
+                    head = github_json(client, 'GET', f'{root}/git/ref/heads/{target_ref}', token)
+                    if head['object']['sha'] != base_sha:
+                        raise GitHubAPIError('Target branch changed since generation. Generate a new proposal.')
+                    identity = {'name': 'CommitFlow', 'email': 'commitflow[bot]@users.noreply.github.com', 'date': commit_date}
+                    commit = github_json(client, 'POST', f'{root}/git/commits', token, json={
+                        'message': proposal.commit_message, 'tree': tree['sha'], 'parents': [base_sha],
+                        'author': identity, 'committer': identity,
                     })
-
-                tree_resp = client.post(
-                    f"{base_url}/git/trees",
-                    headers=headers,
-                    json={"base_tree": base_sha, "tree": tree_items}
-                )
-                tree_resp.raise_for_status()
-                tree_sha = tree_resp.json()["sha"]
-
-                # 3. Create commit
-                commit_resp = client.post(
-                    f"{base_url}/git/commits",
-                    headers=headers,
-                    json={
-                        "message": proposal.commit_message,
-                        "tree": tree_sha,
-                        "parents": [base_sha]
-                    }
-                )
-                commit_resp.raise_for_status()
-                new_commit_sha = commit_resp.json()["sha"]
-
-                # 4. Create branch ref
-                create_branch_resp = client.post(
-                    f"{base_url}/git/refs",
-                    headers=headers,
-                    json={"ref": f"refs/heads/{branch_name}", "sha": new_commit_sha}
-                )
-                create_branch_resp.raise_for_status()
-
-                # 5. Open Pull Request if strategy is PULL_REQUEST
-                pr_url = None
-                pr_num = None
-                if branch_strategy == "PULL_REQUEST":
-                    pr_resp = client.post(
-                        f"{base_url}/pulls",
-                        headers=headers,
-                        json={
-                            "title": proposal.pr_title,
-                            "body": proposal.pr_body,
-                            "head": branch_name,
-                            "base": repository.default_branch
-                        }
-                    )
-                    pr_resp.raise_for_status()
-                    pr_data = pr_resp.json()
-                    pr_url = pr_data["html_url"]
-                    pr_num = pr_data["number"]
-                elif branch_strategy == "DIRECT_PUSH":
-                    # Fast-forward main branch ref
-                    client.patch(
-                        f"{base_url}/git/refs/heads/{repository.default_branch}",
-                        headers=headers,
-                        json={"sha": new_commit_sha, "force": False}
-                    )
-
-                return GitPublisherResult(
-                    success=True,
-                    branch_name=branch_name,
-                    commit_sha=new_commit_sha,
-                    pull_request_url=pr_url,
-                    pull_request_number=pr_num
-                )
-
-            except Exception as e:
-                return GitPublisherResult(
-                    success=False,
-                    branch_name=branch_name,
-                    commit_sha="",
-                    error=str(e)
-                )
+                    commit_sha = commit['sha']
+                    try:
+                        github_json(client, 'POST', f'{root}/git/refs', token,
+                                    json={'ref': f'refs/heads/{branch}', 'sha': commit_sha})
+                    except GitHubAPIError:
+                        existing = existing_branch()
+                        if not existing:
+                            raise
+                        verify_commit(existing)
+                        commit_sha = existing
+                result.commit_sha = commit_sha
+                if branch_strategy == 'PULL_REQUEST':
+                    owner = repository.full_name.split('/')[0]
+                    pull_requests = github_json(client, 'GET', f'{root}/pulls', token,
+                        params={'head': f'{owner}:{branch}', 'base': repository.default_branch, 'state': 'all'})
+                    if pull_requests:
+                        pull = pull_requests[0]
+                    else:
+                        try:
+                            pull = github_json(client, 'POST', f'{root}/pulls', token, json={
+                                'title': proposal.pr_title, 'body': proposal.pr_body,
+                                'head': branch, 'base': repository.default_branch,
+                            })
+                        except GitHubAPIError:
+                            # A concurrent or ambiguous POST may already have created the PR.
+                            pulls = github_json(client, 'GET', f'{root}/pulls', token,
+                                params={'head': f'{owner}:{branch}', 'base': repository.default_branch, 'state': 'all'})
+                            if not pulls:
+                                raise
+                            pull = pulls[0]
+                    if pull.get('head', {}).get('sha') != commit_sha:
+                        raise GitHubAPIError('Pull request head does not match the approved commit.')
+                    result.pull_request_url = pull['html_url']
+                    result.pull_request_number = pull['number']
+                else:
+                    head = github_json(client, 'GET', f'{root}/git/ref/heads/{target_ref}', token)
+                    if head['object']['sha'] != commit_sha:
+                        if head['object']['sha'] != base_sha:
+                            raise GitHubAPIError('Target branch changed. Direct push was not applied.')
+                        github_json(client, 'PATCH', f'{root}/git/refs/heads/{target_ref}', token,
+                                    json={'sha': commit_sha, 'force': False})
+                    final = github_json(client, 'GET', f'{root}/git/ref/heads/{target_ref}', token)
+                    if final['object']['sha'] != commit_sha:
+                        raise GitHubAPIError('GitHub did not confirm the direct push.', retryable=True)
+                    result.branch_name = repository.default_branch
+                result.success = True
+        except GitHubAPIError as exc:
+            result.error = str(exc)
+            result.retryable = exc.retryable
+        except (KeyError, ValueError, TypeError):
+            result.error = 'GitHub returned an invalid response.'
+        return result

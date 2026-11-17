@@ -1,4 +1,5 @@
 from django.urls import path
+from .views import ExecutionMetricsView
 from .views import (
     ExecutionListView,
     ExecutionDetailView,
@@ -8,6 +9,7 @@ from .views import (
 )
 
 urlpatterns = [
+    path('metrics/', ExecutionMetricsView.as_view(), name='execution-metrics'),
     path('', ExecutionListView.as_view(), name='execution-list'),
     path('<uuid:pk>/', ExecutionDetailView.as_view(), name='execution-detail'),
     path('<uuid:pk>/stream/', ExecutionStreamView.as_view(), name='execution-stream'),

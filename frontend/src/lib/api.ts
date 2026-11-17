@@ -1,209 +1,111 @@
 import { Automation, Execution, Repository, AIProviderConfig } from '../types';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-
-function getAuthHeader(): Record<string, string> {
-  if (typeof window === 'undefined') return {};
-  const token = localStorage.getItem('commitflow_token');
-  return token ? { Authorization: `Token ${token}` } : {};
-}
-
-export function setAuthToken(token: string) {
-  if (typeof window !== 'undefined') {
-    localStorage.setItem('commitflow_token', token);
-  }
-}
-
-export function clearAuthToken() {
-  if (typeof window !== 'undefined') {
-    localStorage.removeItem('commitflow_token');
-  }
-}
-
+export const API_BASE = (process.env.NEXT_PUBLIC_API_URL || '').replace(/\/$/, '');
 export function getStoredToken(): string | null {
-  if (typeof window === 'undefined') return null;
-  return localStorage.getItem('commitflow_token');
+  return typeof window === 'undefined' ? null : localStorage.getItem('commitflow_token');
 }
-
-// ── Auth APIs ──
-
+export function setAuthToken(token: string) { localStorage.setItem('commitflow_token', token); }
+export function clearAuthToken() { localStorage.removeItem('commitflow_token'); }
+function errorText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.map(errorText).join(' ');
+  if (value && typeof value === 'object') return Object.values(value).map(errorText).join(' ');
+  return 'Request failed. Please try again.';
+}
+export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const token = getStoredToken();
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...init, headers: { ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(token ? { Authorization: `Token ${token}` } : {}), ...init.headers },
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    if (response.status === 401) clearAuthToken();
+    throw new Error(errorText(data.error || data.error_message || data.detail || data));
+  }
+  return data as T;
+}
+interface AuthResult { token?: string; user?: any; message?: string; verification_required?: boolean }
 export async function loginWithEmail(email: string, password: string) {
-  const res = await fetch(`${API_BASE}/api/auth/login/`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
-  });
-  if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err.non_field_errors?.[0] || 'Invalid credentials');
-  }
-  const data = await res.json();
-  setAuthToken(data.token);
+  const data = await apiRequest<AuthResult>('/api/auth/login/', {method:'POST',body:JSON.stringify({email,password})});
+  if (data.token) setAuthToken(data.token);
   return data;
 }
-
 export async function registerWithEmail(email: string, password: string, name: string) {
-  const res = await fetch(`${API_BASE}/api/auth/register/`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password, name }),
-  });
-  if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err.email?.[0] || 'Registration failed');
-  }
-  const data = await res.json();
-  setAuthToken(data.token);
-  return data;
+  return apiRequest<AuthResult>('/api/auth/register/', {method:'POST',body:JSON.stringify({email,password,name})});
 }
-
+export async function requestPasswordReset(email: string) {
+  return apiRequest<{message:string}>('/api/auth/password-reset/', {method:'POST',body:JSON.stringify({email})});
+}
+function base64url(bytes: Uint8Array) {
+  return btoa(String.fromCharCode(...Array.from(bytes))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
 export async function getOAuthUrl(provider: 'github' | 'google') {
-  const redirectUri = typeof window !== 'undefined' ? `${window.location.origin}/auth/callback` : '';
-  const res = await fetch(`${API_BASE}/api/auth/oauth/url/?provider=${provider}&redirect_uri=${encodeURIComponent(redirectUri)}`);
-  return await res.json();
-}
-
-export async function handleOAuthCallback(provider: 'github' | 'google', code: string) {
-  const redirectUri = typeof window !== 'undefined' ? `${window.location.origin}/auth/callback` : '';
-  const res = await fetch(`${API_BASE}/api/auth/oauth/callback/`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ provider, code, redirect_uri: redirectUri }),
-  });
-  if (!res.ok) throw new Error('OAuth authentication failed');
-  const data = await res.json();
-  setAuthToken(data.token);
+  const verifier = base64url(crypto.getRandomValues(new Uint8Array(48)));
+  const challenge = base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))));
+  const redirectUri = `${window.location.origin}/auth/callback`;
+  const params = new URLSearchParams({provider,redirect_uri:redirectUri,code_challenge:challenge});
+  const data = await apiRequest<{url:string;state:string}>(`/api/auth/oauth/url/?${params}`);
+  sessionStorage.setItem('commitflow_oauth',JSON.stringify({provider,state:data.state,verifier,expires:Date.now()+600000}));
   return data;
 }
-
-export async function getMe() {
-  const res = await fetch(`${API_BASE}/api/auth/me/`, {
-    headers: getAuthHeader(),
-  });
-  if (!res.ok) throw new Error('Unauthorized');
-  return await res.json();
-}
-
-export async function logoutUser() {
+export async function handleOAuthCallback(provider: 'github' | 'google', code: string, state: string) {
+  const stored = JSON.parse(sessionStorage.getItem('commitflow_oauth') || 'null');
+  if (!stored || stored.provider !== provider || stored.state !== state || stored.expires < Date.now()) {
+    throw new Error('Sign-in attempt is invalid or expired. Start sign-in again.');
+  }
   try {
-    await fetch(`${API_BASE}/api/auth/logout/`, {
-      method: 'POST',
-      headers: getAuthHeader(),
-    });
-  } finally {
-    clearAuthToken();
+    const data = await apiRequest<AuthResult>('/api/auth/oauth/callback/', {method:'POST',body:JSON.stringify({
+      provider,code,state,code_verifier:stored.verifier,redirect_uri:`${window.location.origin}/auth/callback`,
+    })});
+    if (data.token) setAuthToken(data.token);
+    return data;
+  } finally { sessionStorage.removeItem('commitflow_oauth'); }
+}
+export function getMe() { return apiRequest<any>('/api/auth/me/'); }
+export async function logoutUser() {
+  try { await apiRequest('/api/auth/logout/',{method:'POST'}); } finally { clearAuthToken(); }
+}
+interface Page<T> { count:number; next:string|null; previous:string|null; results:T[] }
+async function listAll<T>(path: string): Promise<T[]> {
+  const results:T[]=[];
+  for (let offset=0; offset<10000; offset+=100) {
+    const page = await apiRequest<Page<T>>(`${path}?limit=100&offset=${offset}`);
+    results.push(...page.results);
+    if (!page.next) return results;
   }
+  throw new Error('Too many records to display. Narrow the selection.');
 }
-
-// ── Automations APIs ──
-
-export async function fetchAutomations(): Promise<Automation[]> {
-  const res = await fetch(`${API_BASE}/api/automations/`, {
-    headers: getAuthHeader(),
-  });
-  if (!res.ok) return [];
-  return await res.json();
+export function fetchAutomations() { return listAll<Automation>('/api/automations/'); }
+export function createAutomation(data: Partial<Automation>) {
+  return apiRequest<Automation>('/api/automations/',{method:'POST',body:JSON.stringify(data)});
 }
-
-export async function createAutomation(data: Partial<Automation>): Promise<Automation> {
-  const res = await fetch(`${API_BASE}/api/automations/`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
-    body: JSON.stringify(data),
-  });
-  if (!res.ok) {
-    const err = await res.json();
-    throw new Error(JSON.stringify(err));
-  }
-  return await res.json();
+export function toggleAutomation(id: string, enabled: boolean) {
+  return apiRequest<Automation>(`/api/automations/${id}/`,{method:'PATCH',body:JSON.stringify({enabled})});
 }
-
-export async function toggleAutomation(id: string, enabled: boolean): Promise<Automation> {
-  const res = await fetch(`${API_BASE}/api/automations/${id}/`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
-    body: JSON.stringify({ enabled }),
-  });
-  if (!res.ok) throw new Error('Failed to toggle automation');
-  return await res.json();
+export function triggerAutomation(id: string) {
+  return apiRequest<Execution>(`/api/automations/${id}/run/`,{method:'POST',headers:{'Idempotency-Key':crypto.randomUUID()}});
 }
-
-export async function triggerAutomation(id: string): Promise<Execution> {
-  const res = await fetch(`${API_BASE}/api/automations/${id}/run/`, {
-    method: 'POST',
-    headers: getAuthHeader(),
-  });
-  if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err.error || 'Failed to trigger run');
-  }
-  return await res.json();
+export function fetchExecutionPage(offset=0) {
+  return apiRequest<Page<Execution>>(`/api/executions/?limit=25&offset=${offset}`);
 }
-
-// ── Executions APIs ──
-
-export async function fetchExecutions(): Promise<Execution[]> {
-  const res = await fetch(`${API_BASE}/api/executions/`, {
-    headers: getAuthHeader(),
-  });
-  if (!res.ok) return [];
-  return await res.json();
+export async function fetchExecutions() { return (await fetchExecutionPage()).results; }
+export function fetchExecution(id:string, signal?:AbortSignal) { return apiRequest<Execution>(`/api/executions/${id}/`,{signal}); }
+export function approveExecution(id: string, proposal_hash: string) {
+  return apiRequest<Execution>(`/api/executions/${id}/approve/`,{method:'POST',body:JSON.stringify({proposal_hash})});
 }
-
-export async function approveExecution(id: string): Promise<Execution> {
-  const res = await fetch(`${API_BASE}/api/executions/${id}/approve/`, {
-    method: 'POST',
-    headers: getAuthHeader(),
-  });
-  if (!res.ok) throw new Error('Approval failed');
-  return await res.json();
+export function retryExecution(id:string) { return apiRequest<Execution>(`/api/executions/${id}/retry/`,{method:'POST'}); }
+export function fetchRepositories() { return listAll<Repository>('/api/github/repositories/'); }
+export function syncRepositories() { return apiRequest<Repository[]>('/api/github/repositories/sync/',{method:'POST'}); }
+export function fetchAIConfigs() { return listAll<AIProviderConfig>('/api/ai-configs/'); }
+export function saveAIConfig(provider:string,model_name:string,api_key:string,id?:string) {
+  return apiRequest<AIProviderConfig>(`/api/ai-configs/${id ? id+'/' : ''}`,{method:id?'PATCH':'POST',
+    body:JSON.stringify({provider,model_name,...(api_key ? {api_key} : {}),is_active:true})});
 }
-
-// ── Repositories APIs ──
-
-export async function fetchRepositories(): Promise<Repository[]> {
-  const res = await fetch(`${API_BASE}/api/github/repositories/`, {
-    headers: getAuthHeader(),
-  });
-  if (!res.ok) return [];
-  return await res.json();
+export async function testAIConfig(id:string) {
+  return (await apiRequest<{success:boolean}>(`/api/ai-configs/${id}/test/`,{method:'POST'})).success;
 }
-
-export async function syncRepositories(): Promise<Repository[]> {
-  const res = await fetch(`${API_BASE}/api/github/repositories/sync/`, {
-    method: 'POST',
-    headers: getAuthHeader(),
-  });
-  if (!res.ok) throw new Error('Repository sync failed');
-  return await res.json();
-}
-
-// ── AI Configs APIs ──
-
-export async function fetchAIConfigs(): Promise<AIProviderConfig[]> {
-  const res = await fetch(`${API_BASE}/api/ai-configs/`, {
-    headers: getAuthHeader(),
-  });
-  if (!res.ok) return [];
-  return await res.json();
-}
-
-export async function saveAIConfig(provider: string, model_name: string, api_key: string): Promise<AIProviderConfig> {
-  const res = await fetch(`${API_BASE}/api/ai-configs/`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
-    body: JSON.stringify({ provider, model_name, api_key, is_active: true }),
-  });
-  if (!res.ok) throw new Error('Failed to save AI config');
-  return await res.json();
-}
-
-export async function testAIConfig(id: string): Promise<boolean> {
-  const res = await fetch(`${API_BASE}/api/ai-configs/${id}/test/`, {
-    method: 'POST',
-    headers: getAuthHeader(),
-  });
-  if (!res.ok) return false;
-  const data = await res.json();
-  return !!data.success;
+export interface Metrics { streak_days:number;active_automations:number;total_prs:number;validation_pass_rate:number|null }
+export function fetchMetrics() {
+  return apiRequest<Metrics>(`/api/executions/metrics/?timezone=${encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone)}`);
 }

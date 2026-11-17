@@ -1,0 +1,15 @@
+.git
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+**/.venv
+**/node_modules
+**/.next
+**/__pycache__
+**/*.pyc
+**/db.sqlite3*
+**/*.pem
+**/*.key
+**/*.log

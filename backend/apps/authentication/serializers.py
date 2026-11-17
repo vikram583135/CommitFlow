@@ -1,12 +1,14 @@
 from rest_framework import serializers
 from django.contrib.auth import authenticate
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
 from .models import User
 
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ['id', 'email', 'name', 'avatar_url', 'auth_provider', 'created_at']
-        read_only_fields = ['id', 'created_at']
+        fields = ['id', 'email', 'name', 'avatar_url', 'auth_provider', 'email_verified', 'created_at']
+        read_only_fields = fields
 
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, min_length=8)
@@ -14,6 +16,19 @@ class RegisterSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ['id', 'email', 'name', 'password']
+
+    def validate_email(self, value):
+        value = value.lower()
+        if User.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError('An account with this email already exists.')
+        return value
+
+    def validate(self, attrs):
+        try:
+            validate_password(attrs['password'], User(email=attrs['email'], name=attrs.get('name', '')))
+        except ValidationError as exc:
+            raise serializers.ValidationError({'password': exc.messages})
+        return attrs
 
     def create(self, validated_data):
         return User.objects.create_user(

@@ -37,6 +37,7 @@ class User(AbstractBaseUser, PermissionsMixin):
         default='email'
     )
     provider_id = models.CharField(max_length=255, blank=True, db_index=True)
+    email_verified = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -52,3 +53,25 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return self.email
+
+
+class OAuthAttempt(models.Model):
+    state_hash = models.CharField(max_length=64, primary_key=True)
+    provider = models.CharField(max_length=20)
+    redirect_uri = models.URLField()
+    code_challenge = models.CharField(max_length=43)
+    user = models.ForeignKey(User, null=True, on_delete=models.CASCADE)
+    expires_at = models.DateTimeField()
+    consumed = models.BooleanField(default=False)
+
+
+class SocialIdentity(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='social_identities')
+    provider = models.CharField(max_length=20)
+    subject = models.CharField(max_length=255)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['provider', 'subject'], name='unique_social_subject'),
+            models.UniqueConstraint(fields=['user', 'provider'], name='unique_user_provider'),
+        ]

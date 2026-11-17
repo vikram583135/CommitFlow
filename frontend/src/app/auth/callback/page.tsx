@@ -1,105 +1,58 @@
 'use client';
-
-import React, { useEffect, useState, Suspense } from 'react';
+import React, { useEffect, useRef, useState, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { handleOAuthCallback } from '../../../lib/api';
-import { Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
+import { handleOAuthCallback, apiRequest } from '../../../lib/api';
 import Link from 'next/link';
 
 function CallbackHandler() {
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
-  const [errorMessage, setErrorMessage] = useState<string>('');
-
+  const params = useSearchParams();
+  const started = useRef(false);
+  const [status,setStatus] = useState('Verifying your sign-in...');
+  const [error,setError] = useState('');
+  const [password,setPassword] = useState('');
+  const [busy,setBusy] = useState(false);
+  const isReset = !!params.get('reset_token');
   useEffect(() => {
-    const code = searchParams.get('code');
-    const state = searchParams.get('state');
-    const providerParam = searchParams.get('provider');
-    const errorParam = searchParams.get('error') || searchParams.get('error_description');
-
-    if (errorParam) {
-      setStatus('error');
-      setErrorMessage(errorParam);
-      return;
-    }
-
-    if (!code) {
-      setStatus('error');
-      setErrorMessage('No authorization code was provided in the OAuth callback.');
-      return;
-    }
-
-    // Determine provider from state or query param
-    const provider: 'github' | 'google' =
-      state === 'google' || providerParam === 'google' ? 'google' : 'github';
-
-    handleOAuthCallback(provider, code)
-      .then(() => {
-        setStatus('success');
-        setTimeout(() => {
-          router.push('/');
-        }, 1200);
-      })
-      .catch((err: any) => {
-        setStatus('error');
-        setErrorMessage(err.message || 'OAuth token exchange failed');
-      });
-  }, [searchParams, router]);
-
-  return (
-    <div className="min-h-screen bg-black text-white flex items-center justify-center p-4">
-      <div className="w-full max-w-sm rounded-xl bg-zinc-950 p-6 border border-zinc-800 shadow-2xl text-center">
-        {status === 'loading' && (
-          <div className="flex flex-col items-center gap-3">
-            <Loader2 className="w-8 h-8 text-zinc-400 animate-spin" />
-            <h2 className="text-sm font-mono uppercase tracking-wider font-semibold text-white">
-              Authenticating with OAuth...
-            </h2>
-            <p className="text-xs text-zinc-400">Verifying credentials and establishing session</p>
-          </div>
-        )}
-
-        {status === 'success' && (
-          <div className="flex flex-col items-center gap-3">
-            <CheckCircle2 className="w-8 h-8 text-zinc-100" />
-            <h2 className="text-sm font-mono uppercase tracking-wider font-semibold text-white">
-              Authentication Successful
-            </h2>
-            <p className="text-xs text-zinc-400">Redirecting to your dashboard...</p>
-          </div>
-        )}
-
-        {status === 'error' && (
-          <div className="flex flex-col items-center gap-3">
-            <AlertCircle className="w-8 h-8 text-red-400" />
-            <h2 className="text-sm font-mono uppercase tracking-wider font-semibold text-white">
-              Authentication Failed
-            </h2>
-            <p className="text-xs text-zinc-400 font-mono mt-1">{errorMessage}</p>
-            <Link
-              href="/"
-              className="mt-4 px-4 py-2 text-xs font-mono font-medium text-black bg-white hover:bg-zinc-200 rounded transition-colors"
-            >
-              Return to Dashboard
-            </Link>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-export default function OAuthCallbackPage() {
-  return (
-    <Suspense
-      fallback={
-        <div className="min-h-screen bg-black text-white flex items-center justify-center">
-          <Loader2 className="w-6 h-6 text-zinc-400 animate-spin" />
-        </div>
+    if (started.current || isReset) return;
+    started.current = true;
+    const run = async () => {
+      if (params.get('verify')) {
+        const result = await apiRequest<{message:string}>('/api/auth/verify-email/',{method:'POST',body:JSON.stringify({ticket:params.get('verify')})});
+        setStatus(result.message);
+        return;
       }
-    >
-      <CallbackHandler />
-    </Suspense>
-  );
+      if (params.get('error')) throw new Error('Sign-in was cancelled or declined.');
+      const code=params.get('code'), state=params.get('state');
+      const stored=JSON.parse(sessionStorage.getItem('commitflow_oauth') || 'null');
+      if (!code || !state || !stored) throw new Error('No valid sign-in attempt was found. Start again.');
+      await handleOAuthCallback(stored.provider,code,state);
+      setStatus('Sign-in complete. Returning to your dashboard...');
+      router.replace('/');
+    };
+    run().catch((err:Error) => setError(err.message));
+  }, [params,router,isReset]);
+  const reset = async (event:React.FormEvent) => {
+    event.preventDefault(); setBusy(true);setError('');
+    try {
+      const result = await apiRequest<{message:string}>('/api/auth/password-reset/confirm/',{method:'POST',body:JSON.stringify({
+        user:params.get('reset_user'),token:params.get('reset_token'),password,
+      })});
+      setStatus(result.message);setPassword('');router.replace('/');
+    } catch(err) { setError((err as Error).message); } finally {setBusy(false);}
+  };
+  return <main className="min-h-screen bg-black text-white flex items-center justify-center p-4">
+    <div className="w-full max-w-sm rounded-xl bg-zinc-950 p-6 border border-zinc-800 space-y-4 text-sm">
+      {isReset ? <form onSubmit={reset} className="space-y-3"><h1>Choose a new password</h1>
+        <input type="password" autoComplete="new-password" minLength={8} required value={password}
+          onChange={e=>setPassword(e.target.value)} className="w-full p-2 bg-black border border-zinc-700 rounded" aria-label="New password"/>
+        <button disabled={busy} className="px-4 py-2 bg-white text-black rounded">{busy?'Saving...':'Update password'}</button>
+      </form> : <p role="status">{status}</p>}
+      {error && <p role="alert" className="text-red-300">{error}</p>}
+      <Link href="/" className="block text-zinc-400 underline">Return to dashboard</Link>
+    </div>
+  </main>;
+}
+export default function OAuthCallbackPage() {
+  return <Suspense fallback={<p>Loading...</p>}><CallbackHandler/></Suspense>;
 }

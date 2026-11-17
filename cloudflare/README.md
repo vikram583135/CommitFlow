@@ -1,285 +1,85 @@
-# Cloudflare Production Deployment Guide for CommitFlow
+# Deployment with a named Cloudflare Tunnel
 
-This guide provides end-to-end, production-grade instructions to deploy the CommitFlow platform on Cloudflare infrastructure:
+Deploy the Django/Celery services and standalone Next.js Node server using Docker.
+The frontend depends on server-side API rewrites, so uploading a raw `.next`
+directory to Cloudflare Pages is not a supported deployment for this configuration.
+A separate Workers/static-export deployment needs its own build and routing setup.
 
-1. **Frontend:** Deployed to **Cloudflare Pages** (Global Edge CDN, automatic HTTPS, HTTP/3, zero cold starts).
-2. **Backend & Workers:** Deployed to your VPS / server inside **Docker Compose** and securely exposed via **Cloudflare Tunnel (`cloudflared`)** with zero open firewall ports.
+## Prepare production configuration
 
----
+Copy `.env.example` and set:
 
-## 🏛 Architecture Diagram
+- `DEBUG=False`.
+- A unique `DJANGO_SECRET_KEY` of at least 50 characters. Generate it with Python's
+  `secrets.token_urlsafe(64)`.
+- A generated, unique `FIELD_ENCRYPTION_KEY` from `Fernet.generate_key()`.
+- `FRONTEND_URL=https://app.example.com` and
+  `ALLOWED_HOSTS=app.example.com,api.example.com,backend,localhost`.
+- A strong PostgreSQL password, GitHub/Google credentials, GitHub App private key,
+  and a strong `GITHUB_WEBHOOK_SECRET`.
+- Working SMTP settings and a verified `DEFAULT_FROM_EMAIL` sender.
+- `CLOUDFLARE_TUNNEL_TOKEN` from a named tunnel you control. Never put tokens in
+  documentation, source control, browser code, or command history.
 
-```
-                             ┌────────────────────────────────────────┐
-                             │       Cloudflare Global Anycast        │
-                             │         DNS + DDoS Mitigation          │
-                             └───────────────────┬────────────────────┘
-                                                 │
-                        ┌────────────────────────┴────────────────────────┐
-                        ▼                                                 ▼
-             Cloudflare Pages (Edge)                             Cloudflare Tunnel
-        (commitflow.dev / *.pages.dev)                   (api.commitflow.dev / cloudflared)
-                        │                                                 │
-                        │ HTTPS REST & SSE Streams                        │ Outbound-only Encrypted Tunnel
-                        └────────────────────────┬────────────────────────┘ (Zero inbound ports required)
-                                                 ▼
-                                     ┌───────────────────────┐
-                                     │   Your Host Server    │
-                                     │    (Docker Compose)   │
-                                     │                       │
-                                     │ ┌───────────────────┐ │
-                                     │ │   cloudflared     │ │
-                                     │ └─────────┬─────────┘ │
-                                     │           ▼           │
-                                     │ ┌───────────────────┐ │
-                                     │ │   Django Gunicorn │ │
-                                     │ └─────────┬─────────┘ │
-                                     │           ▼           │
-                                     │ ┌───────────────────┐ │
-                                     │ │  Celery Workers   │ │
-                                     │ └─────────┬─────────┘ │
-                                     │           ▼           │
-                                     │ ┌───────────────────┐ │
-                                     │ │  Postgres & Redis │ │
-                                     │ └───────────────────┘ │
-                                     └───────────────────────┘
-```
+For existing data, preserve the encryption key until credentials have been
+explicitly migrated or re-entered. Take a database backup before schema upgrades.
+Production startup refuses missing/known development signing and encryption keys.
+HSTS preload is left opt-in; enable it only after reviewing your domain and
+subdomains' long-term HTTPS requirements.
 
----
+## Start and verify
 
-## 📋 Prerequisites
-
-- A domain active on Cloudflare (e.g. `yourdomain.com`).
-- A Linux VPS (Ubuntu 22.04 / 24.04 or Debian) with **Docker** and **Docker Compose** installed.
-- A free or paid [Cloudflare Account](https://dash.cloudflare.com/).
-
----
-
-## Part 1: Backend Deployment with Cloudflare Tunnel
-
-Cloudflare Tunnel creates an encrypted outbound connection between your server and Cloudflare's edge. You **never need to open ports 80, 443, or 8000** in your VPS firewall.
-
-We support two modes:
-- **Option 1 (Default): Quick Tunnel** — 100% free, instant, zero custom domain required.
-- **Option 2: Named Tunnel (`commitflow-production`)** — Permanent custom subdomains once a domain is linked to Cloudflare.
-
----
-
-### Option 1: Quick Tunnel (`*.trycloudflare.com`) — Instant & Zero-Domain (Default)
-
-Use this to get an instant public HTTPS URL without needing a registered domain or Cloudflare account token.
-
-#### Step 1: Docker Compose Setup (Active in repo)
-The `cloudflared` service in [`docker/docker-compose.yml`](file:///c:/Users/sanvi/Desktop/PROJ/CommitFlow/docker/docker-compose.yml#L110-L115) is configured by default:
-
-```yaml
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: commitflow_tunnel
-    restart: unless-stopped
-    command: tunnel --no-autoupdate --url http://backend:8000
-    depends_on:
-      - backend
-```
-
-#### Step 2: Start Containers and Retrieve Your Public URL
-```bash
-# Start your docker compose stack
-docker compose -f docker/docker-compose.yml up -d --build
-
-# View the generated trycloudflare URL in container logs
-docker logs commitflow_tunnel
-```
-
-Look for the log banner:
-```
-+--------------------------------------------------------------------------------------------+
-|  Your quick Tunnel has been created! Visit it at:                                          |
-|  https://random-assigned-name.trycloudflare.com                                            |
-+--------------------------------------------------------------------------------------------+
-```
-
-#### Step 3: Local Windows Testing Without Docker
-You can also run the local tunnel directly on your machine:
 ```powershell
-.\cloudflare\cloudflared.exe tunnel --url http://127.0.0.1:8000
+docker compose --env-file .env -f docker/docker-compose.yml up --build -d
+docker compose --env-file .env -f docker/docker-compose.yml ps
 ```
 
-Both your API and health checks are immediately reachable:
-- `https://<your-quick-url>.trycloudflare.com/api/`
-- `https://<your-quick-url>.trycloudflare.com/api/health/`
+A migration service finishes schema migrations, schedule reconciliation, and static
+collection before the API starts. Workers and Beat wait for API readiness. The
+health endpoint checks both the database and cache. Keep exactly one Beat instance.
 
-*(Note: CommitFlow backend is already pre-configured to allow `*.trycloudflare.com` in `ALLOWED_HOSTS` and `CSRF_TRUSTED_ORIGINS`).*
+Containers run Gunicorn and the built Next.js server as unprivileged users. Redis
+and PostgreSQL have no published host ports. API/frontend ports bind only to host
+loopback. The optional tunnel is the public ingress. Serve Django admin static
+assets from a separate trusted static server/CDN if using the admin in production.
 
----
+## Configure the tunnel
 
-### Option 2: Named Production Tunnel (`commitflow-production`) — Permanent Subdomains
+In the named tunnel's public-hostname settings, route:
 
-When you are ready for a permanent custom domain (e.g. `api.yourdomain.com`):
+- `app.example.com` to `http://frontend:3000`.
+- Optionally `api.example.com` to `http://backend:8000` for webhooks and direct API
+  clients. Browser requests can use the frontend's same-origin `/api` rewrite.
 
-#### Step 1: Add Token to `.env`
-Add your tunnel token to your server's `.env` file (the `commitflow-production` token is already saved in your local `.env`):
-```ini
-CLOUDFLARE_TUNNEL_TOKEN=eyJoIjoiMjhjNmQ1MGItOWMyNi00ODFjLTg0MGQtMTA0NzA3MmFhMWFhIiwidCI6IjM3ZDI4YWNlNDllNzQ5MTAzZjgxMDE1YThlYjBhZWQ4IiwicyI6Ik1XTmtZVFkwTURndE1qUTNZUzAwTlRVMExUa3lZbVV0WWpJM01ERTVZVEJpTkRVMiJ9
+Then start the explicitly enabled tunnel service:
+
+```powershell
+docker compose --env-file .env -f docker/docker-compose.yml --profile tunnel up -d
 ```
 
-#### Step 2: Switch Docker Compose to Named Tunnel Mode
-In [`docker/docker-compose.yml`](file:///c:/Users/sanvi/Desktop/PROJ/CommitFlow/docker/docker-compose.yml#L114):
-```yaml
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: commitflow_tunnel
-    restart: unless-stopped
-    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
-    depends_on:
-      - backend
-```
+The token is passed through the container environment, not command-line arguments.
+The checked-in YAML tunnel configurations contain placeholders for locally managed
+tunnels. Quick Tunnels are for development, have changing hostnames, and do not
+support SSE. The dashboard uses authenticated polling.
 
-#### Step 3: Configure Public Hostnames in Cloudflare Zero Trust
-1. In [Cloudflare Zero Trust Dashboard](https://one.dash.cloudflare.com/) → **Networks** → **Tunnels**.
-2. Click **commitflow-production** → **Configure** → **Public Hostname** tab:
-   - **Service 1 (Backend API & SSE):**
-     - Subdomain: `api` | Domain: `yourdomain.com`
-     - Type: `HTTP` | URL: `backend:8000`
-   - **Service 2 (Health Check):**
-     - Subdomain: `health` | Domain: `yourdomain.com`
-     - Type: `HTTP` | URL: `backend:8000` | Path: `/api/health/`
-3. Click **Save Hostname**.
+## Operational checks
 
-#### 💡 Free Domain Options for Named Tunnels
-If you don't own a paid domain:
-- **GitHub Student Developer Pack:** Free `.me`, `.tech`, or `.live` domain from Namecheap / Name.com.
-- **Free Registrars:** Free domains from `US.kg` or `EU.org` which support Cloudflare nameservers.
+- Open the public frontend and confirm the readiness endpoint returns HTTP 200.
+- Complete email verification or real OAuth sign-in and connect GitHub.
+- Save/test a real AI key and synchronize repositories.
+- Create a rule with manual approval; inspect its actual diff before approval.
+- Confirm the resulting PR/commit on GitHub. Local unit tests do not establish live
+  installation permissions, organization policy, branch protections, or provider
+  model access.
+- Confirm scheduled dispatch, retry/reconciliation, SMTP delivery, and worker
+  restart behavior against PostgreSQL before enabling unattended execution.
+- Configure edge rate limits for authentication and execution endpoints. Application
+  throttles are an additional control; they are not a complete DDoS defense.
+- Monitor failed executions, repeated queue failures, worker availability, daily
+  generation usage, GitHub rate limits, and database/Redis backups. Do not log
+  request bodies or provider credentials.
 
-
----
-
-## Part 2: Backend Production Environment Settings
-
-Ensure the following variables are set in your VPS `.env` file:
-
-```ini
-# Core Django
-DEBUG=False
-DJANGO_SECRET_KEY=generate_with_python_secrets_token_urlsafe_64
-ALLOWED_HOSTS=api.yourdomain.com,backend,localhost
-
-# Frontend Origin for CORS & OAuth
-FRONTEND_URL=https://yourdomain.com
-
-# PostgreSQL & Redis
-POSTGRES_DB=commitflow
-POSTGRES_USER=commitflow_user
-POSTGRES_PASSWORD=strong_postgres_password_here
-POSTGRES_HOST=postgres
-POSTGRES_PORT=5432
-REDIS_URL=redis://redis:6379/0
-CELERY_BROKER_URL=redis://redis:6379/0
-CELERY_RESULT_BACKEND=redis://redis:6379/0
-
-# Encryption Key (Fernet 32-byte key)
-# Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-FIELD_ENCRYPTION_KEY=your_generated_32_byte_fernet_key=
-
-# GitHub App / OAuth
-GITHUB_APP_ID=123456
-GITHUB_APP_NAME=commitflow-bot
-GITHUB_CLIENT_ID=your_github_client_id
-GITHUB_CLIENT_SECRET=your_github_client_secret
-GITHUB_WEBHOOK_SECRET=your_webhook_secret
-
-# Google OAuth
-GOOGLE_CLIENT_ID=your_google_client_id.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=your_google_client_secret
-
-# AI Provider Keys (Optional defaults)
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-ant-...
-GEMINI_API_KEY=AIzaSy...
-```
-
-Start the stack on your VPS:
-```bash
-docker compose -f docker/docker-compose.yml up -d --build
-```
-
-Verify the tunnel and API health:
-```bash
-curl https://api.yourdomain.com/api/health/
-# Returns: {"status": "ok", "service": "commitflow-api"}
-```
-
----
-
-## Part 3: Deploying Frontend to Cloudflare Pages
-
-### Method 1: Git Integration (Automatic CI/CD via Cloudflare Dashboard)
-
-1. Push your repository to **GitHub** or **GitLab**.
-2. Go to **Cloudflare Dashboard** → **Workers & Pages** → **Create application** → **Pages** → **Connect to Git**.
-3. Select your `CommitFlow` repository and choose the `main` branch.
-4. Set the **Build configuration**:
-   - **Framework preset:** `Next.js (Static / Standalone)`
-   - **Root directory:** `frontend`
-   - **Build command:** `npm run build`
-   - **Build output directory:** `.next` (or `out` if using static export)
-5. Add **Environment Variables** in the Pages project settings:
-   - `NEXT_PUBLIC_API_URL` = `https://api.yourdomain.com`
-   - `NODE_VERSION` = `20.10.0`
-6. Click **Save and Deploy**.
-
-### Method 2: Deploying via Wrangler CLI
-
-You can also deploy directly from your local terminal or CI runner:
-
-```bash
-cd frontend
-
-# 1. Install Wrangler CLI
-npm install -g wrangler
-
-# 2. Login to Cloudflare
-npx wrangler login
-
-# 3. Build and deploy
-npm run build
-npx wrangler pages deploy .next --project-name commitflow-frontend
-```
-
----
-
-## Part 4: Custom Domain & DNS Mapping
-
-1. In Cloudflare Pages, go to **Custom Domains** → **Set up a custom domain**.
-2. Enter your apex domain or subdomain:
-   - Apex: `yourdomain.com`
-   - Or Subdomain: `app.yourdomain.com`
-3. Cloudflare will automatically provision a universal SSL/TLS certificate and configure DNS routing.
-
----
-
-## Part 5: Cloudflare Network & Security Optimizations
-
-### 1. SSL/TLS Mode
-- In Cloudflare Dashboard → **SSL/TLS**:
-  - Set encryption mode to **Full (strict)** or **Full**.
-
-### 2. Real-Time Server-Sent Events (SSE) Execution Stepper
-CommitFlow streams execution progress via Server-Sent Events (`/api/executions/<id>/stream/`).
-- In Cloudflare Dashboard → **Network**:
-  - Enable **WebSockets**.
-  - CommitFlow backend sets `Cache-Control: no-cache` and `X-Accel-Buffering: no`, ensuring Cloudflare does not buffer streaming events.
-
-### 3. Rate Limiting & Anti-DDoS
-- In Cloudflare Dashboard → **Security** → **WAF** → **Rate limiting rules**:
-  - Set a threshold of 100 requests per 10 seconds for `/api/auth/*` to prevent credential brute-forcing.
-
----
-
-## Part 6: Verification Checklist
-
-- [ ] `curl -I https://yourdomain.com` → HTTP 200 (Cloudflare Pages CDN cache hit `cf-cache-status`).
-- [ ] `curl https://api.yourdomain.com/api/health/` → `{"status": "ok", "service": "commitflow-api"}`.
-- [ ] Log in with GitHub or Google OAuth on `https://yourdomain.com`.
-- [ ] Create an automation habit and click "Run Now" to test the real-time SSE execution drawer.
-- [ ] Check Celery Beat logs on the VPS: `docker compose logs -f celery_beat`.
+The project previously contained a tunnel token in this guide. If it was genuine,
+revoke it in Cloudflare and replace the affected deployment token. Scrubbing this
+file does not invalidate the token or erase its history. No credential rotation or
+production deployment is performed by editing these files.

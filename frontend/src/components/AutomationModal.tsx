@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { X, Check, Code, FileText, CheckSquare, BookOpen } from 'lucide-react';
 import { Automation, Repository } from '../types';
 
@@ -6,7 +6,7 @@ interface AutomationModalProps {
   isOpen: boolean;
   onClose: () => void;
   repositories: Repository[];
-  onSave: (automation: Partial<Automation>) => void;
+  onSave: (automation: Partial<Automation>) => Promise<void>;
 }
 
 export const AutomationModal: React.FC<AutomationModalProps> = ({
@@ -24,29 +24,44 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
   const [allowedPaths, setAllowedPaths] = useState('src/, tests/');
   const [cronTime, setCronTime] = useState('09:00');
   const [branchStrategy, setBranchStrategy] = useState<'PULL_REQUEST' | 'DIRECT_PUSH'>('PULL_REQUEST');
-  const [requireApproval, setRequireApproval] = useState(false);
+  const [requireApproval, setRequireApproval] = useState(true);
+  const [timeZone,setTimeZone] = useState(Intl.DateTimeFormat().resolvedOptions().timeZone);
+  const [saving,setSaving] = useState(false);
+  const [error,setError] = useState('');
+  useEffect(() => {
+    if (!repositories.some(repo=>repo.id===selectedRepoId)) setSelectedRepoId(repositories[0]?.id || '');
+  },[repositories,selectedRepoId]);
+  useEffect(() => {
+    const repo=repositories.find(repo=>repo.id===selectedRepoId);
+    if (repo) setAllowedPaths(repo.allowed_paths.join(', '));
+  },[selectedRepoId,repositories]);
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    onSave({
+    setSaving(true);setError('');
+    try {
+    if (!selectedRepoId) throw new Error('Connect and select a repository first.');
+    await onSave({
       title,
       task_type: taskType,
       instructions,
       repository: selectedRepoId || (repositories[0] ? repositories[0].id : ''),
       branch_strategy: branchStrategy,
       require_approval: requireApproval,
-      cron_expression: `0 ${parseInt(cronTime.split(':')[0], 10)} * * *`,
-      timezone: 'UTC',
+      allowed_paths: allowedPaths.split(',').map(path=>path.trim()).filter(Boolean),
+      cron_expression: `${parseInt(cronTime.split(':')[1], 10)} ${parseInt(cronTime.split(':')[0], 10)} * * *`,
+      timezone: timeZone,
       enabled: true,
     });
     onClose();
+    } catch(err) {setError((err as Error).message);} finally {setSaving(false);}
   };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-      <div className="mono-panel w-full max-w-lg rounded-xl bg-zinc-950 p-6 shadow-2xl border border-zinc-800">
+      <div className="mono-panel w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-xl bg-zinc-950 p-6 shadow-2xl border border-zinc-800">
         <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
           <div>
             <h2 className="text-sm font-mono uppercase tracking-wider font-semibold text-white">Create Automation Rule</h2>
@@ -146,7 +161,7 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
             </div>
 
             <div>
-              <label className="block text-[11px] font-mono text-zinc-400 mb-1">DAILY TIME (UTC)</label>
+              <label className="block text-[11px] font-mono text-zinc-400 mb-1">DAILY TIME</label>
               <input
                 type="time"
                 value={cronTime}
@@ -156,12 +171,18 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
             </div>
           </div>
 
+          <label className="block text-[11px] text-zinc-400">TIMEZONE
+            <input value={timeZone} onChange={e=>setTimeZone(e.target.value)} required
+              className="block w-full mt-1 p-2 bg-black border border-zinc-800 rounded"/>
+          </label>
+          <p className="text-[11px] text-zinc-500">Allowed paths apply to all rules for this repository.</p>
+
           <div className="grid grid-cols-2 gap-3 pt-1">
             <div>
               <label className="block text-[11px] font-mono text-zinc-400 mb-1">PUBLISHING MODE</label>
               <select
                 value={branchStrategy}
-                onChange={(e) => setBranchStrategy(e.target.value as any)}
+                onChange={(e) => {setBranchStrategy(e.target.value as any);if(e.target.value==='DIRECT_PUSH') setRequireApproval(true);}}
                 className="w-full px-3 py-2 text-xs rounded bg-black border border-zinc-800 text-white focus:outline-none focus:border-zinc-500 font-mono"
               >
                 <option value="PULL_REQUEST">Pull Request (Default)</option>
@@ -174,6 +195,7 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
                 type="checkbox"
                 id="requireApproval"
                 checked={requireApproval}
+                disabled={branchStrategy==='DIRECT_PUSH'}
                 onChange={(e) => setRequireApproval(e.target.checked)}
                 className="rounded border-zinc-800 text-white focus:ring-0 bg-black"
               />
@@ -182,6 +204,7 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
               </label>
             </div>
           </div>
+          {error && <p role="alert" className="text-xs text-red-300">{error}</p>}
 
           <div className="flex justify-end gap-2 pt-3 border-t border-zinc-800">
             <button
@@ -193,10 +216,11 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
             </button>
             <button
               type="submit"
+              disabled={saving || !selectedRepoId}
               className="flex items-center gap-1.5 px-4 py-1.5 text-xs font-mono font-medium text-black bg-white hover:bg-zinc-200 rounded"
             >
               <Check className="w-3.5 h-3.5" />
-              Save Rule
+              {saving ? 'Saving...' : 'Save Rule'}
             </button>
           </div>
         </form>

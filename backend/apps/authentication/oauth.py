@@ -1,137 +1,68 @@
-import os
+"""OAuth exchanges; missing configuration and unverified identities fail closed."""
+from urllib.parse import urlencode
 import httpx
-from typing import Dict, Any, Optional
+from django.conf import settings
 
-GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID", "")
-GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET", "")
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
-GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 
 class OAuthService:
+    @staticmethod
+    def credentials(provider):
+        if provider not in ('github', 'google'):
+            raise ValueError('Unsupported OAuth provider.')
+        client_id = getattr(settings, provider.upper() + '_CLIENT_ID', '')
+        secret = getattr(settings, provider.upper() + '_CLIENT_SECRET', '')
+        if not client_id or not secret:
+            raise ValueError(f'{provider.title()} OAuth is not configured.')
+        return client_id, secret
+
     @classmethod
-    def get_auth_url(cls, provider: str, redirect_uri: str) -> Dict[str, str]:
-        if provider == "github":
-            client_id = GITHUB_CLIENT_ID or "demo_github_client_id"
-            url = (
-                f"https://github.com/login/oauth/authorize"
-                f"?client_id={client_id}"
-                f"&redirect_uri={redirect_uri}"
-                f"&scope=read:user,user:email,repo"
-                f"&state=github"
-            )
-            return {"provider": "github", "url": url}
-        elif provider == "google":
-            client_id = GOOGLE_CLIENT_ID or "demo_google_client_id"
-            url = (
-                f"https://accounts.google.com/o/oauth2/v2/auth"
-                f"?client_id={client_id}"
-                f"&redirect_uri={redirect_uri}"
-                f"&response_type=code"
-                f"&scope=openid%20email%20profile"
-                f"&access_type=offline"
-                f"&state=google"
-            )
-            return {"provider": "google", "url": url}
+    def get_auth_url(cls, provider, redirect_uri, state, code_challenge):
+        client_id, _ = cls.credentials(provider)
+        params = dict(client_id=client_id, redirect_uri=redirect_uri, state=state,
+                      code_challenge=code_challenge, code_challenge_method='S256')
+        if provider == 'github':
+            endpoint = 'https://github.com/login/oauth/authorize'
+            params['scope'] = 'read:user user:email read:org repo'
         else:
-            raise ValueError(f"Unsupported OAuth provider: {provider}")
+            endpoint = 'https://accounts.google.com/o/oauth2/v2/auth'
+            params.update(response_type='code', scope='openid email profile')
+        return {'provider': provider, 'state': state, 'url': endpoint + '?' + urlencode(params)}
 
     @classmethod
-    def handle_github_callback(cls, code: str, redirect_uri: str) -> Dict[str, Any]:
-        # If client credentials not configured, provide developer fallback
-        if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
-            return {
-                "provider": "github",
-                "provider_id": "gh_dev_developer",
-                "email": "developer@github.com",
-                "name": "GitHub Developer",
-                "avatar_url": "https://avatars.githubusercontent.com/u/583231?v=4",
-                "access_token": "gho_dev_token_placeholder"
-            }
-
+    def exchange(cls, provider, code, redirect_uri, code_verifier):
+        client_id, secret = cls.credentials(provider)
+        if not code:
+            raise ValueError('An authorization code is required.')
+        endpoint = ('https://github.com/login/oauth/access_token' if provider == 'github'
+                    else 'https://oauth2.googleapis.com/token')
         with httpx.Client(timeout=15.0) as client:
-            token_resp = client.post(
-                "https://github.com/login/oauth/access_token",
-                headers={"Accept": "application/json"},
-                data={
-                    "client_id": GITHUB_CLIENT_ID,
-                    "client_secret": GITHUB_CLIENT_SECRET,
-                    "code": code,
-                    "redirect_uri": redirect_uri
-                }
-            )
-            token_resp.raise_for_status()
-            token_data = token_resp.json()
-            access_token = token_data.get("access_token")
-
-            # Fetch user profile
-            user_resp = client.get(
-                "https://api.github.com/user",
-                headers={"Authorization": f"Bearer {access_token}"}
-            )
-            user_resp.raise_for_status()
-            profile = user_resp.json()
-
-            # Fetch primary email if private
-            email = profile.get("email")
-            if not email:
-                emails_resp = client.get(
-                    "https://api.github.com/user/emails",
-                    headers={"Authorization": f"Bearer {access_token}"}
-                )
-                if emails_resp.status_code == 200:
-                    for em in emails_resp.json():
-                        if em.get("primary") and em.get("verified"):
-                            email = em.get("email")
-                            break
-
-            return {
-                "provider": "github",
-                "provider_id": str(profile.get("id")),
-                "email": email or f"{profile.get('login')}@users.noreply.github.com",
-                "name": profile.get("name") or profile.get("login"),
-                "avatar_url": profile.get("avatar_url"),
-                "access_token": access_token
-            }
-
-    @classmethod
-    def handle_google_callback(cls, code: str, redirect_uri: str) -> Dict[str, Any]:
-        if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
-            return {
-                "provider": "google",
-                "provider_id": "google_dev_developer",
-                "email": "developer@gmail.com",
-                "name": "Google Developer",
-                "avatar_url": "https://lh3.googleusercontent.com/a/default-user=s96-c",
-                "access_token": "ya29.dev_token_placeholder"
-            }
-
-        with httpx.Client(timeout=15.0) as client:
-            token_resp = client.post(
-                "https://oauth2.googleapis.com/token",
-                data={
-                    "client_id": GOOGLE_CLIENT_ID,
-                    "client_secret": GOOGLE_CLIENT_SECRET,
-                    "code": code,
-                    "grant_type": "authorization_code",
-                    "redirect_uri": redirect_uri
-                }
-            )
-            token_resp.raise_for_status()
-            token_data = token_resp.json()
-            access_token = token_data.get("access_token")
-
-            user_resp = client.get(
-                "https://www.googleapis.com/oauth2/v3/userinfo",
-                headers={"Authorization": f"Bearer {access_token}"}
-            )
-            user_resp.raise_for_status()
-            profile = user_resp.json()
-
-            return {
-                "provider": "google",
-                "provider_id": str(profile.get("sub")),
-                "email": profile.get("email"),
-                "name": profile.get("name") or profile.get("email"),
-                "avatar_url": profile.get("picture"),
-                "access_token": access_token
-            }
+            response = client.post(endpoint, headers={'Accept': 'application/json'}, data={
+                'client_id': client_id, 'client_secret': secret, 'code': code,
+                'redirect_uri': redirect_uri, 'code_verifier': code_verifier,
+                'grant_type': 'authorization_code',
+            })
+            response.raise_for_status()
+            token = response.json().get('access_token')
+            if not token:
+                raise ValueError('Provider did not return an access token.')
+            headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
+            if provider == 'github':
+                response = client.get('https://api.github.com/user', headers=headers)
+                response.raise_for_status()
+                profile = response.json()
+                response = client.get('https://api.github.com/user/emails', headers=headers)
+                response.raise_for_status()
+                emails = [entry for entry in response.json() if entry.get('verified')]
+                primary = next((entry for entry in emails if entry.get('primary')), None)
+                if not primary or not profile.get('id'):
+                    raise ValueError('A verified primary GitHub email is required.')
+                return dict(provider_id=str(profile['id']), email=primary['email'].lower(),
+                            name=profile.get('name') or profile['login'], login=profile['login'],
+                            avatar_url=profile.get('avatar_url'), access_token=token)
+            response = client.get('https://www.googleapis.com/oauth2/v3/userinfo', headers=headers)
+            response.raise_for_status()
+            profile = response.json()
+            if not profile.get('email_verified') or not profile.get('sub') or not profile.get('email'):
+                raise ValueError('A verified Google email is required.')
+            return dict(provider_id=str(profile['sub']), email=profile['email'].lower(),
+                        name=profile.get('name', ''), avatar_url=profile.get('picture'))

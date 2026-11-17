@@ -1,11 +1,14 @@
 import uuid
 from django.db import models
+from django.conf import settings
 from apps.automations.models import Automation
 
 class Execution(models.Model):
     STATUS_CHOICES = [
         ('PENDING', 'Pending'),
         ('RUNNING', 'Running'),
+        ('PUBLISHING', 'Publishing'),
+        ('CANCELLED', 'Cancelled'),
         ('AWAITING_APPROVAL', 'Awaiting User Approval'),
         ('SUCCESS', 'Success'),
         ('FAILED', 'Failed'),
@@ -23,6 +26,10 @@ class Execution(models.Model):
     output_tokens = models.IntegerField(default=0)
     validation_results = models.JSONField(default=dict, blank=True)
     error_message = models.TextField(blank=True)
+    snapshot = models.JSONField(default=dict, blank=True)
+    proposal_hash = models.CharField(max_length=64, blank=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    heartbeat_at = models.DateTimeField(null=True, blank=True)
     
     started_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)
@@ -45,6 +52,7 @@ class GeneratedFile(models.Model):
 
     class Meta:
         ordering = ['file_path']
+        constraints = [models.UniqueConstraint(fields=['execution', 'file_path'], name='unique_execution_file')]
 
     def __str__(self):
         return f"{self.change_type} {self.file_path}"
@@ -61,3 +69,9 @@ class PublishedChange(models.Model):
 
     def __str__(self):
         return f"Commit {self.commit_sha[:7]} ({self.branch_name})"
+
+
+class GenerationUsage(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    execution = models.ForeignKey(Execution, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)

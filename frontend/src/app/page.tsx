@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Header } from '../components/Header';
 import { MetricCards } from '../components/MetricCards';
 import { DiffViewer } from '../components/DiffViewer';
@@ -22,6 +22,7 @@ import {
   getMe,
   logoutUser,
   getStoredToken,
+  fetchExecution, fetchExecutionPage, fetchMetrics, Metrics, approveExecution, retryExecution,
 } from '../lib/api';
 import { Clock, ChevronRight, Pause, PlayCircle, Play } from 'lucide-react';
 
@@ -41,47 +42,65 @@ export default function Dashboard() {
   const [activeExecutionId, setActiveExecutionId] = useState<string | null>(null);
   const [isSyncingRepos, setIsSyncingRepos] = useState(false);
   const [activeTab, setActiveTab] = useState<'overview' | 'executions' | 'automations'>('overview');
+  const [error,setError] = useState('');
+  const [hasMore,setHasMore] = useState(false);
+  const [loadingMore,setLoadingMore] = useState(false);
+  const [metrics,setMetrics] = useState<Metrics>({streak_days:0,active_automations:0,total_prs:0,validation_pass_rate:null});
+  const loadVersion=useRef(0);
+  const startingRun=useRef(false);
 
   useEffect(() => {
     loadInitialData();
   }, []);
 
   async function loadInitialData() {
-    // 1. Try to load user profile
-    if (getStoredToken()) {
-      try {
-        const u = await getMe();
-        setUser(u);
-      } catch {
-        setUser(null);
-      }
+    const version=++loadVersion.current;
+    if(!getStoredToken()) return;
+    setError('');
+    try {
+      const [profile,autos,page,repos,configs,stats]=await Promise.all([
+        getMe(),fetchAutomations(),fetchExecutionPage(),fetchRepositories(),fetchAIConfigs(),fetchMetrics(),
+      ]);
+      if(version!==loadVersion.current) return;
+      setUser(profile);setAutomations(autos);setExecutions(page.results);setRepositories(repos);setAiConfigs(configs);setMetrics(stats);setHasMore(!!page.next);
+      if(page.results[0]) await selectExecution(page.results[0]);
+    } catch(err) {if(version===loadVersion.current) setError((err as Error).message);}
+  }
+
+  async function selectExecution(execution:Execution) {
+    setSelectedExecution(execution);
+    try {const detail=await fetchExecution(execution.id);setSelectedExecution(current=>current?.id===detail.id?detail:current);}
+    catch(err) {setError((err as Error).message);}
+  }
+  const updateExecution=useCallback((run:Execution)=>{
+    setExecutions(previous=>previous.map(item=>item.id===run.id?run:item));
+    setSelectedExecution(previous=>previous?.id===run.id?run:previous);
+    if(['SUCCESS','FAILED','REJECTED','CANCELLED','AWAITING_APPROVAL'].includes(run.status)) {
+      fetchMetrics().then(setMetrics).catch(err=>setError((err as Error).message));
     }
-
-    // 2. Fetch live data
-    const [autos, execs, repos, configs] = await Promise.all([
-      fetchAutomations(),
-      fetchExecutions(),
-      fetchRepositories(),
-      fetchAIConfigs(),
-    ]);
-
-    setAutomations(autos);
-    setExecutions(execs);
-    setRepositories(repos);
-    setAiConfigs(configs);
-
-    if (execs.length > 0) {
-      setSelectedExecution(execs[0]);
-    }
+  },[]);
+  async function resumeExecution(run:Execution,approve:boolean) {
+    const result=approve?await approveExecution(run.id,run.proposal_hash || ''):await retryExecution(run.id);
+    updateExecution(result);setActiveExecutionId(result.id);setIsDrawerOpen(true);
+  }
+  async function loadMore() {
+    const version=loadVersion.current;
+    setLoadingMore(true);
+    try {const page=await fetchExecutionPage(executions.length);if(version!==loadVersion.current)return;setExecutions(previous=>[
+      ...previous,...page.results.filter(item=>!previous.some(existing=>existing.id===item.id))]);setHasMore(!!page.next);}
+    catch(err){setError((err as Error).message);}finally{setLoadingMore(false);}
   }
 
   const handleLogout = async () => {
-    await logoutUser();
+    ++loadVersion.current;
+    try{await logoutUser();}catch(err){setError((err as Error).message);}
     setUser(null);
     setAutomations([]);
     setExecutions([]);
     setRepositories([]);
     setSelectedExecution(null);
+    setAiConfigs([]);setIsDrawerOpen(false);setActiveExecutionId(null);setHasMore(false);
+    setMetrics({streak_days:0,active_automations:0,total_prs:0,validation_pass_rate:null});
   };
 
   const handleSyncRepos = async () => {
@@ -90,7 +109,7 @@ export default function Dashboard() {
       const repos = await syncRepositories();
       setRepositories(repos);
     } catch (e: any) {
-      console.error('Repo sync error:', e);
+      setError(e.message);
     } finally {
       setIsSyncingRepos(false);
     }
@@ -101,11 +120,12 @@ export default function Dashboard() {
       const updated = await toggleAutomation(id, !currentEnabled);
       setAutomations((prev) => prev.map((a) => (a.id === id ? updated : a)));
     } catch (e) {
-      console.error(e);
+      setError((e as Error).message);
     }
   };
 
   const handleTriggerRun = async (automationId?: string) => {
+    if(startingRun.current) return;
     const targetId = automationId || automations[0]?.id;
     if (!targetId) {
       setIsAutomationModalOpen(true);
@@ -113,6 +133,7 @@ export default function Dashboard() {
     }
 
     try {
+      startingRun.current=true;
       const run = await triggerAutomation(targetId);
       setActiveExecutionId(run.id);
       setIsDrawerOpen(true);
@@ -122,16 +143,14 @@ export default function Dashboard() {
       setExecutions(execs);
     } catch (err: any) {
       alert(err.message || 'Failed to trigger run');
-    }
+    } finally {startingRun.current=false;}
   };
 
   const handleSaveAutomation = async (newAuto: Partial<Automation>) => {
-    try {
       const created = await createAutomation(newAuto);
       setAutomations((prev) => [created, ...prev]);
-    } catch (err: any) {
-      alert(err.message || 'Failed to create automation');
-    }
+      setRepositories(await fetchRepositories());
+      setMetrics(await fetchMetrics());
   };
 
   return (
@@ -140,29 +159,30 @@ export default function Dashboard() {
         user={user}
         onOpenAuth={() => setIsAuthModalOpen(true)}
         onLogout={handleLogout}
-        onNewAutomation={() => setIsAutomationModalOpen(true)}
-        onOpenSettings={() => setIsSettingsModalOpen(true)}
+        onNewAutomation={() => user?setIsAutomationModalOpen(true):setIsAuthModalOpen(true)}
+        onOpenSettings={() => user?setIsSettingsModalOpen(true):setIsAuthModalOpen(true)}
         onSyncRepos={handleSyncRepos}
         isSyncingRepos={isSyncingRepos}
       />
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 w-full space-y-6 flex-1">
+        {error && <div role="alert" className="p-3 text-xs text-red-300 border border-zinc-700 rounded">{error}</div>}
         {/* Metric Cards Row */}
         <MetricCards
-          streakDays={executions.filter((e) => e.status === 'SUCCESS').length > 0 ? 1 : 0}
+          streakDays={metrics.streak_days}
           activeAutomations={automations.filter((a) => a.enabled).length}
-          totalPRs={executions.filter((e) => e.published_change?.pull_request_url).length}
-          securityRate={100}
+          totalPRs={metrics.total_prs}
+          securityRate={metrics.validation_pass_rate}
         />
 
         {/* If no automations configured yet: Show Onboarding Hero */}
         {automations.length === 0 ? (
           <OnboardingHero
             hasGitHub={repositories.length > 0}
-            hasAIConfig={aiConfigs.length > 0}
+            hasAIConfig={aiConfigs.some(config=>config.is_active)}
             onConnectGitHub={() => setIsAuthModalOpen(true)}
-            onOpenAIConfig={() => setIsSettingsModalOpen(true)}
-            onCreateAutomation={() => setIsAutomationModalOpen(true)}
+            onOpenAIConfig={() => user?setIsSettingsModalOpen(true):setIsAuthModalOpen(true)}
+            onCreateAutomation={() => user?setIsAutomationModalOpen(true):setIsAuthModalOpen(true)}
           />
         ) : (
           <>
@@ -288,7 +308,7 @@ export default function Dashboard() {
                           return (
                             <div
                               key={exec.id}
-                              onClick={() => setSelectedExecution(exec)}
+                              onClick={() => selectExecution(exec)}
                               className={`p-2.5 rounded border cursor-pointer transition-all ${
                                 isSelected
                                   ? 'bg-zinc-900 border-zinc-500'
@@ -324,7 +344,7 @@ export default function Dashboard() {
 
                 {/* Right Column: Code Diff & Safety Inspector */}
                 <div className="lg:col-span-7">
-                  <DiffViewer execution={selectedExecution} />
+                  <DiffViewer execution={selectedExecution} onApprove={run=>resumeExecution(run,true)} onRetry={run=>resumeExecution(run,false)}/>
                 </div>
               </div>
             )}
@@ -404,7 +424,7 @@ export default function Dashboard() {
                         <td className="py-3 px-4 font-sans">
                           <button
                             onClick={() => {
-                              setSelectedExecution(exec);
+                              selectExecution(exec);
                               setActiveTab('overview');
                             }}
                             className="text-zinc-300 hover:text-white flex items-center gap-1 font-mono text-[10px] uppercase"
@@ -416,6 +436,7 @@ export default function Dashboard() {
                     ))}
                   </tbody>
                 </table>
+                {hasMore && <button disabled={loadingMore} onClick={loadMore} className="p-4 text-xs text-zinc-300">{loadingMore?'Loading...':'Load more executions'}</button>}
               </div>
             )}
           </>
@@ -424,6 +445,7 @@ export default function Dashboard() {
 
       {/* Modals & Live Execution Drawer */}
       <AuthModal
+        linking={!!user}
         isOpen={isAuthModalOpen}
         onClose={() => setIsAuthModalOpen(false)}
         onSuccess={(loggedUser) => {
@@ -438,6 +460,8 @@ export default function Dashboard() {
         onSave={handleSaveAutomation}
       />
       <AISettingsModal
+        configs={aiConfigs}
+        onSaved={async()=>{setAiConfigs(await fetchAIConfigs());}}
         isOpen={isSettingsModalOpen}
         onClose={() => setIsSettingsModalOpen(false)}
       />
@@ -445,10 +469,9 @@ export default function Dashboard() {
         isOpen={isDrawerOpen}
         onClose={() => setIsDrawerOpen(false)}
         executionId={activeExecutionId}
-        onViewDiff={async () => {
-          const execs = await fetchExecutions();
-          setExecutions(execs);
-          if (execs.length > 0) setSelectedExecution(execs[0]);
+        onUpdate={updateExecution}
+        onViewDiff={async (id) => {
+          try {setSelectedExecution(await fetchExecution(id));setActiveTab('overview');}catch(err){setError((err as Error).message);}
         }}
       />
     </div>
